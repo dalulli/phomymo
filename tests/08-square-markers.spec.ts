@@ -64,6 +64,9 @@ test.describe.serial('AprilTag and ArUco builders', () => {
   test('adds an AprilTag block with editable ID text', async ({ page }) => {
     await openMarkerProperties(page, 'apriltag');
     await page.locator('#apriltag-family').selectOption('tag25h9');
+    await page.locator('#prop-apriltag-id-font-family').selectOption('Arial, sans-serif');
+    await page.locator('#prop-apriltag-id-font-size').fill('18');
+    await page.locator('#prop-apriltag-id-font-size').dispatchEvent('input');
     await selectMarkers(page, 'apriltag', ['3']);
     await page.locator('#apriltag-size').fill('120');
     await page.click('#apriltag-add-marker');
@@ -86,9 +89,13 @@ test.describe.serial('AprilTag and ArUco builders', () => {
     });
     expect(text).toMatchObject({
       text: 'AT3',
+      background: 'transparent',
+      fontFamily: 'Arial, sans-serif',
+      fontSize: 18,
       cctagBlockRole: 'id',
       cctagBlockKind: 'apriltag',
     });
+    expect(text.height).toBeLessThan(marker.height);
     expect(text.groupId).toBe(marker.groupId);
     expect(text.cctagBlockId).toBe(marker.cctagBlockId);
   });
@@ -114,6 +121,8 @@ test.describe.serial('AprilTag and ArUco builders', () => {
     expect(markers.map(el => el.markerId)).toEqual([1, 4, 6]);
     expect(markers.every(el => el.arucoDictionary === 'DICT_4X4_50')).toBe(true);
     expect(texts.map(el => el.text)).toEqual(['#001', '#004', '#006']);
+    expect(texts.every(el => el.background === 'transparent')).toBe(true);
+    expect(texts.every(el => el.height < markers[0].height)).toBe(true);
 
     const blocks = Array.from(new Set(elements.map(el => el.cctagBlockId).filter(Boolean))).map(blockId => {
       const members = elements.filter(el => el.cctagBlockId === blockId);

@@ -581,6 +581,10 @@ function isCCTagBlockMember(element) {
   return !!element?.cctagBlockId;
 }
 
+function isMarkerBlockMember(element) {
+  return !!element?.cctagBlockId;
+}
+
 function syncCCTagBlockText(elements, marker) {
   if (!marker?.cctagBlockId) return elements;
   return elements.map(el => {
@@ -791,13 +795,15 @@ function normalizeCCTagGap(value, fallback, max = 512) {
 
 function getCCTagIdTextWidth(size) {
   const fontSize = Number.parseInt(state.textDefaults.fontSize, 10) || DEFAULT_TEXT_DEFAULTS.fontSize;
-  return Math.max(36, Math.round(size * 0.7), Math.round(fontSize * 2.4));
+  return Math.max(24, Math.round(fontSize * 1.9));
 }
 
 function getCCTagBlockMetrics(size, addIdText = true, orientation = 'landscape', idGap = 4) {
   const normalizedSize = normalizeCCTagSize(size);
   const gap = addIdText ? normalizeCCTagGap(idGap, 4, 96) : 0;
   const textWidth = addIdText ? getCCTagIdTextWidth(normalizedSize) : 0;
+  const fontSize = Number.parseInt(state.textDefaults.fontSize, 10) || DEFAULT_TEXT_DEFAULTS.fontSize;
+  const textHeight = addIdText ? Math.min(normalizedSize, Math.max(12, Math.round(fontSize * 1.35))) : 0;
   const unrotatedWidth = textWidth + gap + normalizedSize;
   const unrotatedHeight = normalizedSize;
 
@@ -805,6 +811,7 @@ function getCCTagBlockMetrics(size, addIdText = true, orientation = 'landscape',
     size: normalizedSize,
     gap,
     textWidth,
+    textHeight,
     unrotatedWidth,
     unrotatedHeight,
     width: unrotatedWidth,
@@ -922,10 +929,11 @@ function createCCTagBlockElements(markerId, options = {}) {
         ...getTextDefaults(),
         align: 'right',
         x: baseX,
-        y: baseY,
+        y: baseY + Math.max(0, (metrics.size - metrics.textHeight) / 2),
         width: metrics.textWidth,
-        height: metrics.size,
+        height: metrics.textHeight,
         rotation: orientation === 'portrait' ? 270 : 0,
+        background: 'transparent',
         zone,
       }),
       groupId,
@@ -1039,7 +1047,14 @@ function modifySelectedCCTagIdText(changes) {
   const blocks = getSelectedCCTagBlocks();
   const texts = blocks.map(block => block.text).filter(Boolean);
   const targets = texts.length ? texts : [getSelectedCCTagIdText()].filter(Boolean);
-  if (!targets.length) return;
+  if (!targets.length) {
+    state.textDefaults = normalizeTextDefaults({
+      ...state.textDefaults,
+      ...Object.fromEntries(Object.entries(changes).filter(([key]) => TEXT_DEFAULT_KEYS.includes(key))),
+    });
+    saveTextDefaults();
+    return;
+  }
 
   saveHistory();
   targets.forEach(text => {
@@ -1080,6 +1095,7 @@ function reflowSelectedCCTagBlocks(options = {}) {
   blocks.forEach((block, index) => {
     const position = positions[index];
     const textWidth = block.text ? metrics.textWidth : 0;
+    const textHeight = block.text ? metrics.textHeight : 0;
     const markerX = position.x + textWidth + (block.text ? idGap : 0);
     const ids = block.elements.map(el => el.id);
 
@@ -1088,11 +1104,12 @@ function reflowSelectedCCTagBlocks(options = {}) {
         return {
           ...el,
           x: position.x,
-          y: position.y,
+          y: position.y + Math.max(0, (size - textHeight) / 2),
           width: textWidth,
-          height: size,
-          rotation: 0,
+          height: textHeight,
+          rotation: block.text?.rotation ?? el.rotation ?? 0,
           align: 'right',
+          background: 'transparent',
         };
       }
       if (el.id === block.marker.id) {
@@ -1102,7 +1119,7 @@ function reflowSelectedCCTagBlocks(options = {}) {
           y: position.y,
           width: size,
           height: size,
-          rotation: 0,
+          rotation: block.marker.rotation ?? el.rotation ?? 0,
         };
       }
       return el;
@@ -1133,6 +1150,14 @@ function rotateCCTagBlockTo(marker, targetRotation) {
   render();
   updatePropertiesPanel();
   return true;
+}
+
+function getDefaultIdTextControlValues() {
+  return {
+    text: '',
+    fontFamily: state.textDefaults.fontFamily || DEFAULT_TEXT_DEFAULTS.fontFamily,
+    fontSize: state.textDefaults.fontSize || DEFAULT_TEXT_DEFAULTS.fontSize,
+  };
 }
 
 const SQUARE_MARKER_CONFIGS = {
@@ -1453,17 +1478,20 @@ function syncSquareMarkerBlockText(elements, marker) {
 
 function getSquareMarkerIdTextWidth(size) {
   const fontSize = Number.parseInt(state.textDefaults.fontSize, 10) || DEFAULT_TEXT_DEFAULTS.fontSize;
-  return Math.max(42, Math.round(size * 0.75), Math.round(fontSize * 2.7));
+  return Math.max(30, Math.round(fontSize * 2.35));
 }
 
 function getSquareMarkerBlockMetrics(kind, size, addIdText = true, orientation = 'landscape', idGap = 4) {
   const normalizedSize = normalizeSquareMarkerSize(kind, size);
   const gap = addIdText ? normalizeCCTagGap(idGap, 4, 96) : 0;
   const textWidth = addIdText ? getSquareMarkerIdTextWidth(normalizedSize) : 0;
+  const fontSize = Number.parseInt(state.textDefaults.fontSize, 10) || DEFAULT_TEXT_DEFAULTS.fontSize;
+  const textHeight = addIdText ? Math.min(normalizedSize, Math.max(12, Math.round(fontSize * 1.35))) : 0;
   return {
     size: normalizedSize,
     gap,
     textWidth,
+    textHeight,
     width: textWidth + gap + normalizedSize,
     height: normalizedSize,
   };
@@ -1514,10 +1542,11 @@ function createSquareMarkerBlockElements(kind, markerId, options = {}) {
         ...getTextDefaults(),
         align: 'right',
         x: baseX,
-        y: baseY,
+        y: baseY + Math.max(0, (metrics.size - metrics.textHeight) / 2),
         width: metrics.textWidth,
-        height: metrics.size,
+        height: metrics.textHeight,
         rotation: orientation === 'portrait' ? 270 : 0,
+        background: 'transparent',
         zone,
       }),
       groupId,
@@ -1634,7 +1663,14 @@ function modifySelectedSquareMarkerIdText(kind, changes) {
   const texts = blocks.map(block => block.text).filter(Boolean);
   const marker = getSelectedSquareMarkerMarker(kind) || getSelectedSquareMarkerBlockMarker(kind) || blocks[0]?.marker;
   const targets = texts.length ? texts : [getSquareMarkerBlockIdText(marker)].filter(Boolean);
-  if (!targets.length) return;
+  if (!targets.length) {
+    state.textDefaults = normalizeTextDefaults({
+      ...state.textDefaults,
+      ...Object.fromEntries(Object.entries(changes).filter(([key]) => TEXT_DEFAULT_KEYS.includes(key))),
+    });
+    saveTextDefaults();
+    return;
+  }
 
   saveHistory();
   targets.forEach(text => {
@@ -1673,15 +1709,25 @@ function reflowSelectedSquareMarkerBlocks(kind, options = {}) {
   blocks.forEach((block, index) => {
     const position = positions[index];
     const textWidth = block.text ? metrics.textWidth : 0;
+    const textHeight = block.text ? metrics.textHeight : 0;
     const markerX = position.x + textWidth + (block.text ? idGap : 0);
     const ids = block.elements.map(el => el.id);
 
     state.elements = state.elements.map(el => {
       if (el.id === block.text?.id) {
-        return { ...el, x: position.x, y: position.y, width: textWidth, height: size, rotation: 0, align: 'right' };
+        return {
+          ...el,
+          x: position.x,
+          y: position.y + Math.max(0, (size - textHeight) / 2),
+          width: textWidth,
+          height: textHeight,
+          rotation: block.text?.rotation ?? el.rotation ?? 0,
+          align: 'right',
+          background: 'transparent',
+        };
       }
       if (el.id === block.marker.id) {
-        return { ...el, x: markerX, y: position.y, width: size, height: size, rotation: 0 };
+        return { ...el, x: markerX, y: position.y, width: size, height: size, rotation: block.marker.rotation ?? el.rotation ?? 0 };
       }
       return el;
     });
@@ -3675,10 +3721,10 @@ function updatePropertiesPanel() {
 
   if (isCCTagAddMode) {
     $('#props-cctag')?.classList.remove('hidden');
-    $('#cctag-edit-controls')?.classList.add('hidden');
+    $('#cctag-edit-controls')?.classList.remove('hidden');
     $('#cctag-add-controls')?.classList.remove('hidden');
     $('#cctag-strip-edit-controls')?.classList.add('hidden');
-    updateCCTagIdTextControls(null);
+    updateCCTagIdTextControls(getDefaultIdTextControlValues());
     populateCCTagGrid($('#cctag-marker-grid'));
     updateCCTagBuilderSelectionUI();
     return;
@@ -3702,7 +3748,7 @@ function updatePropertiesPanel() {
     if (config) {
       const family = getSquareMarkerFamily(config);
       $(`#props-${kind}`)?.classList.remove('hidden');
-      $(`#${kind}-edit-controls`)?.classList.add('hidden');
+      $(`#${kind}-edit-controls`)?.classList.remove('hidden');
       $(`#${kind}-add-controls`)?.classList.remove('hidden');
       $(`#${kind}-strip-edit-controls`)?.classList.add('hidden');
       populateSquareMarkerFamilySelect(kind, $(`#${kind}-${kind === 'aruco' ? 'dictionary' : 'family'}`));
@@ -3711,7 +3757,7 @@ function updatePropertiesPanel() {
       const builderFamily = $(`#${kind}-${kind === 'aruco' ? 'dictionary' : 'family'}`);
       if (builderFamily) builderFamily.value = family;
       populateSquareMarkerGrid(kind, $(`#${kind}-marker-grid`));
-      updateSquareMarkerIdTextControls(kind, null);
+      updateSquareMarkerIdTextControls(kind, getDefaultIdTextControlValues());
       updateSquareMarkerBuilderSelectionUI(kind);
       return;
     }
@@ -4654,6 +4700,9 @@ function handleCanvasMouseMove(e) {
         break;
 
       case 'group-resize':
+        if (state.dragStartElements?.some(isMarkerBlockMember)) {
+          break;
+        }
         // Multi-element resize - scale from original positions
         const { scaleX, scaleY } = calculateGroupResize(
           state.dragStartBounds,
@@ -5269,6 +5318,9 @@ function handleCanvasPointerMove(e) {
       }
 
       case 'group-resize': {
+        if (state.dragStartElements?.some(isMarkerBlockMember)) {
+          break;
+        }
         const { scaleX, scaleY } = calculateGroupResize(
           state.dragStartBounds,
           state.dragHandle,
@@ -5717,6 +5769,9 @@ function handleCanvasTouchMove(e) {
     }
 
     case 'group-resize': {
+      if (state.dragStartElements?.some(isMarkerBlockMember)) {
+        break;
+      }
       const { scaleX, scaleY } = calculateGroupResize(
         state.dragStartBounds,
         state.dragHandle,
