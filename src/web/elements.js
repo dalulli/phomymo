@@ -7,6 +7,16 @@ import {
   CCTAG_MIN_SIZE,
   normalizeCCTagId,
 } from './cctag.js?v=1';
+import {
+  APRILTAG_MIN_SIZE,
+  normalizeAprilTagFamily,
+  normalizeAprilTagId,
+} from './apriltag.js?v=2';
+import {
+  ARUCO_MIN_SIZE,
+  normalizeArUcoDictionary,
+  normalizeArUcoId,
+} from './aruco.js?v=2';
 
 /**
  * Generate unique ID
@@ -123,6 +133,50 @@ export function createCCTagElement(markerId = 0, options = {}) {
     height: size,
     rotation: options.rotation ?? 0,
     markerId: normalizeCCTagId(markerId),
+  };
+}
+
+export function createAprilTagElement(markerId = 0, options = {}) {
+  const family = normalizeAprilTagFamily(options.family || options.aprilTagFamily);
+  const parsedSize = Number.parseFloat(options.size ?? options.width ?? options.height);
+  const size = Math.max(
+    APRILTAG_MIN_SIZE,
+    Math.round(Number.isFinite(parsedSize) ? parsedSize : 100)
+  );
+
+  return {
+    id: generateId(),
+    type: 'apriltag',
+    zone: options.zone ?? 0,
+    x: options.x ?? 50,
+    y: options.y ?? 50,
+    width: size,
+    height: size,
+    rotation: options.rotation ?? 0,
+    markerId: normalizeAprilTagId(markerId, family),
+    aprilTagFamily: family,
+  };
+}
+
+export function createArUcoElement(markerId = 0, options = {}) {
+  const dictionary = normalizeArUcoDictionary(options.dictionary || options.arucoDictionary);
+  const parsedSize = Number.parseFloat(options.size ?? options.width ?? options.height);
+  const size = Math.max(
+    ARUCO_MIN_SIZE,
+    Math.round(Number.isFinite(parsedSize) ? parsedSize : 100)
+  );
+
+  return {
+    id: generateId(),
+    type: 'aruco',
+    zone: options.zone ?? 0,
+    x: options.x ?? 50,
+    y: options.y ?? 50,
+    width: size,
+    height: size,
+    rotation: options.rotation ?? 0,
+    markerId: normalizeArUcoId(markerId, dictionary),
+    arucoDictionary: dictionary,
   };
 }
 
@@ -325,6 +379,8 @@ export const MIN_SIZES = {
   qr: { width: 50, height: 50 },
   shape: { width: 10, height: 10 },
   cctag: { width: CCTAG_MIN_SIZE, height: CCTAG_MIN_SIZE },
+  apriltag: { width: APRILTAG_MIN_SIZE, height: APRILTAG_MIN_SIZE },
+  aruco: { width: ARUCO_MIN_SIZE, height: ARUCO_MIN_SIZE },
 };
 
 /**
@@ -332,7 +388,7 @@ export const MIN_SIZES = {
  */
 export function constrainSize(element) {
   const min = MIN_SIZES[element.type] || { width: 20, height: 20 };
-  if (element.type === 'cctag') {
+  if (element.type === 'cctag' || element.type === 'apriltag' || element.type === 'aruco') {
     const size = Math.max(element.width, element.height, min.width, min.height);
     return {
       ...element,

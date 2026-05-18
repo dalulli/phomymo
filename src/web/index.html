@@ -482,6 +482,24 @@
           <span class="hidden sm:inline">CCTag</span>
         </button>
       </div>
+      <div class="relative flex items-center">
+        <button id="add-apriltag-btn" class="toolbar-btn" title="AprilTag Properties">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <rect x="5" y="5" width="14" height="14" stroke-width="2"></rect>
+            <path stroke-width="2" d="M9 9h2v2H9zM13 9h2v2h-2zM9 13h2v2H9zM13 13h2v2h-2z"></path>
+          </svg>
+          <span class="hidden sm:inline">AprilTag</span>
+        </button>
+      </div>
+      <div class="relative flex items-center">
+        <button id="add-aruco-btn" class="toolbar-btn" title="ArUco Properties">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <rect x="4" y="4" width="16" height="16" stroke-width="2"></rect>
+            <path stroke-width="2" d="M8 8h3v3H8zM13 8h3v3h-3zM8 13h3v3H8zM14 14h2v2h-2z"></path>
+          </svg>
+          <span class="hidden sm:inline">ArUco</span>
+        </button>
+      </div>
       <!-- Shape dropdown -->
       <div class="relative flex items-center">
         <button id="add-shape-btn" class="toolbar-btn toolbar-btn-menu" title="Add Shape">
@@ -506,6 +524,8 @@
             Line
           </button>
         </div>
+
+
       </div>
 
       <div class="toolbar-divider"></div>
@@ -1194,6 +1214,260 @@
               </div>
             </div>
             <button id="cctag-strip-apply" class="w-full px-2 py-1.5 text-xs bg-gray-900 text-white rounded hover:bg-gray-800">
+              Apply to selected
+            </button>
+          </div>
+        </div>
+
+        <!-- AprilTag Properties -->
+        <div id="props-apriltag" class="hidden space-y-2">
+          <div id="apriltag-edit-controls">
+            <label class="text-[10px] text-gray-400 uppercase tracking-wide">Family</label>
+            <select id="prop-apriltag-family" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"></select>
+            <label class="text-[10px] text-gray-400 uppercase tracking-wide mt-2 block">Marker ID</label>
+            <select id="prop-apriltag-marker" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"></select>
+            <div id="apriltag-id-text-controls" class="hidden mt-2 space-y-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">ID Text</label>
+                <input type="text" id="prop-apriltag-id-text" class="w-full px-2 py-1.5 text-sm border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400" placeholder="#001">
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="text-[10px] text-gray-400 uppercase tracking-wide">Font</label>
+                  <select id="prop-apriltag-id-font-family" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400">
+                    <option value="Inter, sans-serif">Inter</option>
+                    <option value="Roboto, sans-serif">Roboto</option>
+                    <option value="Open Sans, sans-serif">Open Sans</option>
+                    <option value="Arial, sans-serif">Arial</option>
+                    <option value="Georgia, serif">Georgia</option>
+                    <option value="Times New Roman, serif">Times New Roman</option>
+                    <option value="Roboto Mono, monospace">Roboto Mono</option>
+                    <option value="Courier New, monospace">Courier New</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="text-[10px] text-gray-400 uppercase tracking-wide">Size</label>
+                  <input type="number" id="prop-apriltag-id-font-size" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="6" max="200" value="24">
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="apriltag-add-controls" class="pt-2 border-t border-gray-100 space-y-3">
+            <div>
+              <label class="text-[10px] text-gray-400 uppercase tracking-wide">Family</label>
+              <select id="apriltag-family" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"></select>
+            </div>
+            <div class="flex items-center justify-between">
+              <label class="text-[10px] text-gray-400 uppercase tracking-wide">Markers</label>
+              <span id="apriltag-selected-count" class="text-[10px] text-gray-500">1 selected</span>
+            </div>
+            <div id="apriltag-marker-grid" class="grid grid-cols-8 gap-1 max-h-60 overflow-y-auto"></div>
+            <div class="flex gap-1.5">
+              <button id="apriltag-select-all" type="button" class="flex-1 px-2 py-1 text-[11px] border border-gray-200 rounded hover:bg-gray-50">All</button>
+              <button id="apriltag-clear-selection" type="button" class="flex-1 px-2 py-1 text-[11px] border border-gray-200 rounded hover:bg-gray-50">Clear</button>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Spacing</label>
+                <select id="apriltag-layout" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400">
+                  <option value="even">Even</option>
+                  <option value="random">Random</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Format</label>
+                <select id="apriltag-orientation" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400">
+                  <option value="landscape">Landscape</option>
+                  <option value="portrait">Portrait</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Size px</label>
+                <input type="number" id="apriltag-size" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="16" max="96" value="48">
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">ID Gap</label>
+                <input type="number" id="apriltag-id-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="96" value="4">
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Min Gap</label>
+                <input type="number" id="apriltag-min-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="96" value="3">
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Max Gap</label>
+                <input type="number" id="apriltag-max-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="512" value="512">
+              </div>
+            </div>
+            <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-600">
+              <input type="checkbox" id="apriltag-add-id" class="w-3 h-3 rounded border-gray-300" checked>
+              Add #ID
+            </label>
+            <button id="apriltag-add-marker" class="w-full px-2 py-1.5 text-xs bg-gray-900 text-white rounded hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed">
+              Add selected
+            </button>
+          </div>
+          <div id="apriltag-strip-edit-controls" class="hidden pt-2 border-t border-gray-100 space-y-3">
+            <div class="flex items-center justify-between">
+              <label class="text-[10px] text-gray-400 uppercase tracking-wide">Selected strip</label>
+              <span id="apriltag-strip-selected-count" class="text-[10px] text-gray-500">0 blocks</span>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Layout</label>
+                <select id="apriltag-strip-layout" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400">
+                  <option value="even">Even</option>
+                  <option value="random">Random</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Size px</label>
+                <input type="number" id="apriltag-strip-size" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="16" max="96" value="48">
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">ID Gap</label>
+                <input type="number" id="apriltag-strip-id-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="96" value="4">
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Min Gap</label>
+                <input type="number" id="apriltag-strip-min-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="96" value="3">
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Max Gap</label>
+                <input type="number" id="apriltag-strip-max-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="512" value="512">
+              </div>
+            </div>
+            <button id="apriltag-strip-apply" class="w-full px-2 py-1.5 text-xs bg-gray-900 text-white rounded hover:bg-gray-800">
+              Apply to selected
+            </button>
+          </div>
+        </div>
+
+        <!-- ArUco Properties -->
+        <div id="props-aruco" class="hidden space-y-2">
+          <div id="aruco-edit-controls">
+            <label class="text-[10px] text-gray-400 uppercase tracking-wide">Dictionary</label>
+            <select id="prop-aruco-dictionary" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"></select>
+            <label class="text-[10px] text-gray-400 uppercase tracking-wide mt-2 block">Marker ID</label>
+            <select id="prop-aruco-marker" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"></select>
+            <div id="aruco-id-text-controls" class="hidden mt-2 space-y-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">ID Text</label>
+                <input type="text" id="prop-aruco-id-text" class="w-full px-2 py-1.5 text-sm border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400" placeholder="#001">
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="text-[10px] text-gray-400 uppercase tracking-wide">Font</label>
+                  <select id="prop-aruco-id-font-family" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400">
+                    <option value="Inter, sans-serif">Inter</option>
+                    <option value="Roboto, sans-serif">Roboto</option>
+                    <option value="Open Sans, sans-serif">Open Sans</option>
+                    <option value="Arial, sans-serif">Arial</option>
+                    <option value="Georgia, serif">Georgia</option>
+                    <option value="Times New Roman, serif">Times New Roman</option>
+                    <option value="Roboto Mono, monospace">Roboto Mono</option>
+                    <option value="Courier New, monospace">Courier New</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="text-[10px] text-gray-400 uppercase tracking-wide">Size</label>
+                  <input type="number" id="prop-aruco-id-font-size" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="6" max="200" value="24">
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="aruco-add-controls" class="pt-2 border-t border-gray-100 space-y-3">
+            <div>
+              <label class="text-[10px] text-gray-400 uppercase tracking-wide">Dictionary</label>
+              <select id="aruco-dictionary" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400"></select>
+            </div>
+            <div class="flex items-center justify-between">
+              <label class="text-[10px] text-gray-400 uppercase tracking-wide">Markers</label>
+              <span id="aruco-selected-count" class="text-[10px] text-gray-500">1 selected</span>
+            </div>
+            <div id="aruco-marker-grid" class="grid grid-cols-8 gap-1 max-h-60 overflow-y-auto"></div>
+            <div class="flex gap-1.5">
+              <button id="aruco-select-all" type="button" class="flex-1 px-2 py-1 text-[11px] border border-gray-200 rounded hover:bg-gray-50">All</button>
+              <button id="aruco-clear-selection" type="button" class="flex-1 px-2 py-1 text-[11px] border border-gray-200 rounded hover:bg-gray-50">Clear</button>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Spacing</label>
+                <select id="aruco-layout" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400">
+                  <option value="even">Even</option>
+                  <option value="random">Random</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Format</label>
+                <select id="aruco-orientation" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400">
+                  <option value="landscape">Landscape</option>
+                  <option value="portrait">Portrait</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Size px</label>
+                <input type="number" id="aruco-size" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="16" max="96" value="48">
+              </div>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">ID Gap</label>
+                <input type="number" id="aruco-id-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="96" value="4">
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Min Gap</label>
+                <input type="number" id="aruco-min-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="96" value="3">
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Max Gap</label>
+                <input type="number" id="aruco-max-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="512" value="512">
+              </div>
+            </div>
+            <label class="flex items-center gap-1.5 cursor-pointer text-[11px] text-gray-600">
+              <input type="checkbox" id="aruco-add-id" class="w-3 h-3 rounded border-gray-300" checked>
+              Add #ID
+            </label>
+            <button id="aruco-add-marker" class="w-full px-2 py-1.5 text-xs bg-gray-900 text-white rounded hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed">
+              Add selected
+            </button>
+          </div>
+          <div id="aruco-strip-edit-controls" class="hidden pt-2 border-t border-gray-100 space-y-3">
+            <div class="flex items-center justify-between">
+              <label class="text-[10px] text-gray-400 uppercase tracking-wide">Selected strip</label>
+              <span id="aruco-strip-selected-count" class="text-[10px] text-gray-500">0 blocks</span>
+            </div>
+            <div class="grid grid-cols-3 gap-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Layout</label>
+                <select id="aruco-strip-layout" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400">
+                  <option value="even">Even</option>
+                  <option value="random">Random</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Size px</label>
+                <input type="number" id="aruco-strip-size" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="16" max="96" value="48">
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">ID Gap</label>
+                <input type="number" id="aruco-strip-id-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="96" value="4">
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Min Gap</label>
+                <input type="number" id="aruco-strip-min-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="96" value="3">
+              </div>
+              <div>
+                <label class="text-[10px] text-gray-400 uppercase tracking-wide">Max Gap</label>
+                <input type="number" id="aruco-strip-max-gap" class="w-full px-1.5 py-1 text-xs border border-gray-200 rounded focus:outline-none focus:ring-1 focus:ring-blue-400 text-center" min="0" max="512" value="512">
+              </div>
+            </div>
+            <button id="aruco-strip-apply" class="w-full px-2 py-1.5 text-xs bg-gray-900 text-white rounded hover:bg-gray-800">
               Apply to selected
             </button>
           </div>
@@ -2288,7 +2562,7 @@
     pdfjsModule.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs';
     window.pdfjsLib = pdfjsModule;
   </script>
-  <script type="module" src="app.js?v=153"></script>
+  <script type="module" src="app.js?v=156"></script>
   <script>
     // Show body once styles are ready
     requestAnimationFrame(() => {

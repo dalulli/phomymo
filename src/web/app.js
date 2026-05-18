@@ -4,7 +4,7 @@
  * v118
  */
 
-import { CanvasRenderer } from './canvas.js?v=115';
+import { CanvasRenderer } from './canvas.js?v=116';
 import { BLETransport } from './ble.js?v=103';
 import { USBTransport } from './usb.js?v=101';
 import { print, printDensityTest, isDSeriesPrinter, isP12Printer, isA30Printer, isTapePrinter, isPM241Printer, isTSPLPrinter, isRotatedPrinter, getPrinterWidthBytes, getPrinterDpi, getPrinterAlignment, getPrinterDescription, isDeviceRecognized, getMatchedPattern, loadPrinterDefinitions, getAllPrinterDefinitions, getPrinterDefinition, getCustomPrinterDefinitions, saveCustomPrinterDefinition, deleteCustomPrinterDefinition, isBuiltinPrinter, resetBuiltinPrinter, getAvailableProtocols, getAvailableLabelPresets, getDetectedDefinition } from './printer.js?v=128';
@@ -15,6 +15,8 @@ import {
   createBarcodeElement,
   createQRElement,
   createCCTagElement,
+  createAprilTagElement,
+  createArUcoElement,
   createShapeElement,
   updateElement,
   bringToFront,
@@ -36,7 +38,7 @@ import {
   collapseToSingleZone,
   hasElementsInHigherZones,
   removeElementsInHigherZones,
-} from './elements.js?v=101';
+} from './elements.js?v=102';
 import {
   CCTAG_MAX_ID,
   CCTAG_MIN_ID,
@@ -46,6 +48,26 @@ import {
   loadCCTagRadii,
   normalizeCCTagId,
 } from './cctag.js?v=1';
+import {
+  APRILTAG_MIN_SIZE,
+  formatAprilTagId,
+  getAprilTagFamilies,
+  getAprilTagFamily,
+  getAprilTagMaxId,
+  getAprilTagMatrix,
+  normalizeAprilTagFamily,
+  normalizeAprilTagId,
+} from './apriltag.js?v=2';
+import {
+  ARUCO_MIN_SIZE,
+  formatArUcoId,
+  getArUcoDictionaries,
+  getArUcoDictionary,
+  getArUcoMaxId,
+  getArUcoMatrix,
+  normalizeArUcoDictionary,
+  normalizeArUcoId,
+} from './aruco.js?v=2';
 import {
   HandleType,
   getHandleAtPoint,
@@ -177,6 +199,8 @@ const DEFAULT_TEXT_DEFAULTS = {
   autoScale: false,
 };
 const CCTAG_MAX_BUILDER_SIZE = 96;
+const APRILTAG_MAX_BUILDER_SIZE = 96;
+const ARUCO_MAX_BUILDER_SIZE = 96;
 
 // App state
 const state = {
@@ -229,6 +253,14 @@ const state = {
   propertiesMode: null,     // Tool-specific properties view when nothing is selected
   textDefaults: { ...DEFAULT_TEXT_DEFAULTS },
   cctagBuilder: {
+    selectedIds: new Set([0]),
+  },
+  aprilTagBuilder: {
+    family: 'tag25h9',
+    selectedIds: new Set([0]),
+  },
+  arucoBuilder: {
+    dictionary: 'DICT_6X6_250',
     selectedIds: new Set([0]),
   },
   // Multi-label roll configuration
@@ -475,7 +507,7 @@ async function initLocalFonts() {
  * @returns {string} Dither mode ('auto', 'none', 'threshold', 'floyd-steinberg', 'atkinson', 'ordered')
  */
 function getDitherMode(elements) {
-  if (elements.some(el => el.type === 'cctag')) {
+  if (elements.some(el => el.type === 'cctag' || isSquareMarkerType(el.type))) {
     return 'threshold';
   }
 
@@ -546,6 +578,10 @@ function getSelectedCCTagBlocks() {
 }
 
 function isCCTagBlockMember(element) {
+  return !!element?.cctagBlockId;
+}
+
+function isMarkerBlockMember(element) {
   return !!element?.cctagBlockId;
 }
 
@@ -694,6 +730,17 @@ function initCCTagData() {
     });
 }
 
+function initSquareMarkerData() {
+  ['apriltag', 'aruco'].forEach(kind => {
+    const familyControlName = kind === 'aruco' ? 'dictionary' : 'family';
+    const config = getSquareMarkerConfig(kind);
+    const family = getSquareMarkerFamily(config);
+    populateSquareMarkerFamilySelect(kind, $(`#${kind}-${familyControlName}`));
+    populateSquareMarkerFamilySelect(kind, $(`#prop-${kind}-${familyControlName}`));
+    populateSquareMarkerSelect(kind, $(`#prop-${kind}-marker`), family);
+  });
+}
+
 function getDefaultCCTagSize() {
   const dims = state.renderer.getSingleLabelDimensions();
   const size = Math.floor(Math.min(dims.width, dims.height));
@@ -748,13 +795,15 @@ function normalizeCCTagGap(value, fallback, max = 512) {
 
 function getCCTagIdTextWidth(size) {
   const fontSize = Number.parseInt(state.textDefaults.fontSize, 10) || DEFAULT_TEXT_DEFAULTS.fontSize;
-  return Math.max(36, Math.round(size * 0.7), Math.round(fontSize * 2.4));
+  return Math.max(24, Math.round(fontSize * 1.9));
 }
 
 function getCCTagBlockMetrics(size, addIdText = true, orientation = 'landscape', idGap = 4) {
   const normalizedSize = normalizeCCTagSize(size);
   const gap = addIdText ? normalizeCCTagGap(idGap, 4, 96) : 0;
   const textWidth = addIdText ? getCCTagIdTextWidth(normalizedSize) : 0;
+  const fontSize = Number.parseInt(state.textDefaults.fontSize, 10) || DEFAULT_TEXT_DEFAULTS.fontSize;
+  const textHeight = addIdText ? Math.min(normalizedSize, Math.max(12, Math.round(fontSize * 1.35))) : 0;
   const unrotatedWidth = textWidth + gap + normalizedSize;
   const unrotatedHeight = normalizedSize;
 
@@ -762,6 +811,7 @@ function getCCTagBlockMetrics(size, addIdText = true, orientation = 'landscape',
     size: normalizedSize,
     gap,
     textWidth,
+    textHeight,
     unrotatedWidth,
     unrotatedHeight,
     width: unrotatedWidth,
@@ -879,10 +929,11 @@ function createCCTagBlockElements(markerId, options = {}) {
         ...getTextDefaults(),
         align: 'right',
         x: baseX,
-        y: baseY,
+        y: baseY + Math.max(0, (metrics.size - metrics.textHeight) / 2),
         width: metrics.textWidth,
-        height: metrics.size,
+        height: metrics.textHeight,
         rotation: orientation === 'portrait' ? 270 : 0,
+        background: 'transparent',
         zone,
       }),
       groupId,
@@ -996,7 +1047,14 @@ function modifySelectedCCTagIdText(changes) {
   const blocks = getSelectedCCTagBlocks();
   const texts = blocks.map(block => block.text).filter(Boolean);
   const targets = texts.length ? texts : [getSelectedCCTagIdText()].filter(Boolean);
-  if (!targets.length) return;
+  if (!targets.length) {
+    state.textDefaults = normalizeTextDefaults({
+      ...state.textDefaults,
+      ...Object.fromEntries(Object.entries(changes).filter(([key]) => TEXT_DEFAULT_KEYS.includes(key))),
+    });
+    saveTextDefaults();
+    return;
+  }
 
   saveHistory();
   targets.forEach(text => {
@@ -1037,6 +1095,7 @@ function reflowSelectedCCTagBlocks(options = {}) {
   blocks.forEach((block, index) => {
     const position = positions[index];
     const textWidth = block.text ? metrics.textWidth : 0;
+    const textHeight = block.text ? metrics.textHeight : 0;
     const markerX = position.x + textWidth + (block.text ? idGap : 0);
     const ids = block.elements.map(el => el.id);
 
@@ -1045,11 +1104,12 @@ function reflowSelectedCCTagBlocks(options = {}) {
         return {
           ...el,
           x: position.x,
-          y: position.y,
+          y: position.y + Math.max(0, (size - textHeight) / 2),
           width: textWidth,
-          height: size,
-          rotation: 0,
+          height: textHeight,
+          rotation: block.text?.rotation ?? el.rotation ?? 0,
           align: 'right',
+          background: 'transparent',
         };
       }
       if (el.id === block.marker.id) {
@@ -1059,7 +1119,7 @@ function reflowSelectedCCTagBlocks(options = {}) {
           y: position.y,
           width: size,
           height: size,
-          rotation: 0,
+          rotation: block.marker.rotation ?? el.rotation ?? 0,
         };
       }
       return el;
@@ -1085,6 +1145,610 @@ function rotateCCTagBlockTo(marker, targetRotation) {
     x: bounds.x + bounds.width / 2,
     y: bounds.y + bounds.height / 2,
   };
+  state.elements = rotateElements(state.elements, members.map(el => el.id), angleDelta, center);
+  members.forEach(el => state.renderer.clearCache(el.id));
+  render();
+  updatePropertiesPanel();
+  return true;
+}
+
+function getDefaultIdTextControlValues() {
+  return {
+    text: '',
+    fontFamily: state.textDefaults.fontFamily || DEFAULT_TEXT_DEFAULTS.fontFamily,
+    fontSize: state.textDefaults.fontSize || DEFAULT_TEXT_DEFAULTS.fontSize,
+  };
+}
+
+const SQUARE_MARKER_CONFIGS = {
+  apriltag: {
+    kind: 'apriltag',
+    type: 'apriltag',
+    label: 'AprilTag',
+    builderKey: 'aprilTagBuilder',
+    familyProp: 'aprilTagFamily',
+    familyStateKey: 'family',
+    defaultFamily: 'tag25h9',
+    minSize: APRILTAG_MIN_SIZE,
+    maxBuilderSize: APRILTAG_MAX_BUILDER_SIZE,
+    getFamilies: getAprilTagFamilies,
+    getFamily: getAprilTagFamily,
+    normalizeFamily: normalizeAprilTagFamily,
+    getMaxId: getAprilTagMaxId,
+    normalizeId: normalizeAprilTagId,
+    formatId: formatAprilTagId,
+    getMatrix: getAprilTagMatrix,
+    createElement: createAprilTagElement,
+  },
+  aruco: {
+    kind: 'aruco',
+    type: 'aruco',
+    label: 'ArUco',
+    builderKey: 'arucoBuilder',
+    familyProp: 'arucoDictionary',
+    familyStateKey: 'dictionary',
+    defaultFamily: 'DICT_6X6_250',
+    minSize: ARUCO_MIN_SIZE,
+    maxBuilderSize: ARUCO_MAX_BUILDER_SIZE,
+    getFamilies: getArUcoDictionaries,
+    getFamily: getArUcoDictionary,
+    normalizeFamily: normalizeArUcoDictionary,
+    getMaxId: getArUcoMaxId,
+    normalizeId: normalizeArUcoId,
+    formatId: formatArUcoId,
+    getMatrix: getArUcoMatrix,
+    createElement: createArUcoElement,
+  },
+};
+
+function getSquareMarkerConfig(kind) {
+  return SQUARE_MARKER_CONFIGS[kind] || null;
+}
+
+function isSquareMarkerType(type) {
+  return type === 'apriltag' || type === 'aruco';
+}
+
+function generateSquareMarkerBlockId(kind) {
+  return `${kind}_block_` + Date.now().toString(36) + Math.random().toString(36).slice(2, 11);
+}
+
+function getSquareMarkerFamily(config, value) {
+  return config.normalizeFamily(value || state[config.builderKey][config.familyStateKey] || config.defaultFamily);
+}
+
+function formatSquareMarkerIdText(markerId) {
+  const normalized = Number.parseInt(markerId, 10);
+  return `#${String(Number.isFinite(normalized) ? normalized : 0).padStart(3, '0')}`;
+}
+
+function populateSquareMarkerFamilySelect(kind, select) {
+  const config = getSquareMarkerConfig(kind);
+  if (!config || !select || select.dataset.populated === 'true') return;
+  select.innerHTML = '';
+  config.getFamilies().forEach(familyName => {
+    const option = document.createElement('option');
+    option.value = familyName;
+    option.textContent = familyName;
+    select.appendChild(option);
+  });
+  select.dataset.populated = 'true';
+}
+
+function populateSquareMarkerSelect(kind, select, familyName) {
+  const config = getSquareMarkerConfig(kind);
+  if (!config || !select) return;
+  const family = getSquareMarkerFamily(config, familyName);
+  if (select.dataset.family === family && select.options.length) return;
+  select.innerHTML = '';
+  for (let id = 0; id <= config.getMaxId(family); id++) {
+    const option = document.createElement('option');
+    option.value = String(id);
+    option.textContent = config.formatId(id, family);
+    select.appendChild(option);
+  }
+  select.dataset.family = family;
+}
+
+function drawMatrixMarkerPreviewCanvas(canvas, matrix) {
+  if (!canvas || !matrix) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const size = canvas.width;
+  const cells = matrix.length;
+  const cellSize = size / cells;
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, size, size);
+  ctx.fillStyle = 'black';
+  for (let y = 0; y < cells; y++) {
+    for (let x = 0; x < cells; x++) {
+      if (matrix[y][x]) {
+        ctx.fillRect(
+          Math.floor(x * cellSize),
+          Math.floor(y * cellSize),
+          Math.ceil(cellSize),
+          Math.ceil(cellSize)
+        );
+      }
+    }
+  }
+}
+
+function populateSquareMarkerGrid(kind, container) {
+  const config = getSquareMarkerConfig(kind);
+  if (!config || !container) return;
+  const family = getSquareMarkerFamily(config);
+  if (container.dataset.family === family && container.dataset.populated === 'true') {
+    updateSquareMarkerBuilderSelectionUI(kind);
+    return;
+  }
+
+  container.innerHTML = '';
+  const maxId = config.getMaxId(family);
+  for (let id = 0; id <= maxId; id++) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `${kind}-marker-option flex flex-col items-center gap-0.5 rounded border border-gray-200 bg-white p-1 text-[10px] text-gray-600 hover:border-blue-300 hover:bg-blue-50`;
+    button.dataset.markerId = String(id);
+    button.setAttribute('aria-pressed', state[config.builderKey].selectedIds.has(id) ? 'true' : 'false');
+    button.title = `${config.label} ${config.formatId(id, family)}`;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 28;
+    canvas.height = 28;
+    drawMatrixMarkerPreviewCanvas(canvas, config.getMatrix(family, id));
+
+    const label = document.createElement('span');
+    label.textContent = `#${String(id).padStart(maxId >= 100 ? 3 : 2, '0')}`;
+
+    button.append(canvas, label);
+    button.addEventListener('click', () => toggleSquareMarkerBuilderMarker(kind, id));
+    container.appendChild(button);
+  }
+
+  container.dataset.populated = 'true';
+  container.dataset.family = family;
+  updateSquareMarkerBuilderSelectionUI(kind);
+}
+
+function toggleSquareMarkerBuilderMarker(kind, markerId) {
+  const config = getSquareMarkerConfig(kind);
+  if (!config) return;
+  const family = getSquareMarkerFamily(config);
+  const normalized = config.normalizeId(markerId, family);
+  if (state[config.builderKey].selectedIds.has(normalized)) {
+    state[config.builderKey].selectedIds.delete(normalized);
+  } else {
+    state[config.builderKey].selectedIds.add(normalized);
+  }
+  updateSquareMarkerBuilderSelectionUI(kind);
+}
+
+function setSquareMarkerBuilderSelection(kind, ids) {
+  const config = getSquareMarkerConfig(kind);
+  if (!config) return;
+  const family = getSquareMarkerFamily(config);
+  state[config.builderKey].selectedIds = new Set(ids.map(id => config.normalizeId(id, family)));
+  updateSquareMarkerBuilderSelectionUI(kind);
+}
+
+function getSquareMarkerBuilderSelection(kind) {
+  const config = getSquareMarkerConfig(kind);
+  if (!config) return [];
+  return Array.from(state[config.builderKey].selectedIds).sort((a, b) => a - b);
+}
+
+function updateSquareMarkerBuilderSelectionUI(kind) {
+  const config = getSquareMarkerConfig(kind);
+  if (!config) return;
+  const family = getSquareMarkerFamily(config);
+  $$(`.${kind}-marker-option`).forEach(btn => {
+    const selected = state[config.builderKey].selectedIds.has(config.normalizeId(btn.dataset.markerId, family));
+    btn.classList.toggle('border-blue-500', selected);
+    btn.classList.toggle('bg-blue-50', selected);
+    btn.classList.toggle('text-blue-700', selected);
+    btn.classList.toggle('ring-1', selected);
+    btn.classList.toggle('ring-blue-400', selected);
+    btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
+  });
+
+  const count = state[config.builderKey].selectedIds.size;
+  $(`#${kind}-selected-count`) && ($(`#${kind}-selected-count`).textContent = `${count} selected`);
+  $(`#${kind}-add-marker`) && ($(`#${kind}-add-marker`).disabled = count === 0);
+}
+
+function showSquareMarkerPropertiesMode(kind) {
+  const config = getSquareMarkerConfig(kind);
+  if (!config) return;
+  state.propertiesMode = `${kind}-add`;
+  state.selectedIds = [];
+  $('#shape-dropdown')?.classList.add('hidden');
+  updateToolbarState();
+  updatePropertiesPanel();
+  render();
+}
+
+function updateSquareMarkerFamily(kind, familyName) {
+  const config = getSquareMarkerConfig(kind);
+  if (!config) return;
+  const family = config.normalizeFamily(familyName);
+  state[config.builderKey][config.familyStateKey] = family;
+  state[config.builderKey].selectedIds = new Set([0]);
+  populateSquareMarkerSelect(kind, $(`#prop-${kind}-${kind === 'aruco' ? 'dictionary' : 'family'}`), family);
+  populateSquareMarkerGrid(kind, $(`#${kind}-marker-grid`));
+  updateSquareMarkerBuilderSelectionUI(kind);
+}
+
+function getDefaultSquareMarkerSize(kind) {
+  const config = getSquareMarkerConfig(kind);
+  const dims = state.renderer.getSingleLabelDimensions();
+  const size = Math.floor(Math.min(dims.width, dims.height));
+  return Math.max(config?.minSize || 16, size);
+}
+
+function normalizeSquareMarkerSize(kind, value) {
+  const config = getSquareMarkerConfig(kind);
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return getDefaultSquareMarkerSize(kind);
+  return Math.max(config?.minSize || 16, Math.round(parsed));
+}
+
+function normalizeSquareMarkerBuilderSize(kind, value, fallback) {
+  const config = getSquareMarkerConfig(kind);
+  const baseSize = value === undefined || value === null || value === ''
+    ? normalizeSquareMarkerSize(kind, fallback)
+    : normalizeSquareMarkerSize(kind, value);
+  return Math.min(config?.maxBuilderSize || 96, baseSize);
+}
+
+function normalizeSquareMarkerGeometry(element, changes = {}) {
+  if (!isSquareMarkerType(element.type)) return changes;
+  const config = getSquareMarkerConfig(element.type);
+  const normalized = { ...changes };
+  const family = config.normalizeFamily(normalized[config.familyProp] || element[config.familyProp]);
+
+  if (config.familyProp in normalized) {
+    normalized[config.familyProp] = family;
+    normalized.markerId = config.normalizeId(normalized.markerId ?? element.markerId, family);
+  }
+  if ('markerId' in normalized) {
+    normalized.markerId = config.normalizeId(normalized.markerId, family);
+  }
+  if ('width' in normalized || 'height' in normalized) {
+    const editedSize = 'width' in normalized ? normalized.width : normalized.height;
+    const size = normalizeSquareMarkerSize(element.type, editedSize);
+    normalized.width = size;
+    normalized.height = size;
+  }
+  return normalized;
+}
+
+function getSquareMarkerBlockIdText(marker) {
+  if (!marker?.cctagBlockId) return null;
+  return state.elements.find(el => el.cctagBlockId === marker.cctagBlockId && el.cctagBlockRole === 'id') || null;
+}
+
+function getSelectedSquareMarkerMarker(kind) {
+  const config = getSquareMarkerConfig(kind);
+  const selected = getSelectedElements();
+  return selected.find(el => el.type === config?.type) || null;
+}
+
+function getSelectedSquareMarkerBlockMarker(kind) {
+  const config = getSquareMarkerConfig(kind);
+  const selected = getSelectedElements();
+  if (selected.length < 2) return null;
+  const blockIds = new Set(selected.map(el => el.cctagBlockId).filter(Boolean));
+  const [blockId] = Array.from(blockIds);
+  if (blockIds.size !== 1 || selected.some(el => el.cctagBlockId !== blockId || el.cctagBlockKind !== kind)) {
+    return null;
+  }
+  return selected.find(el => el.type === config?.type && el.cctagBlockRole === 'marker') || null;
+}
+
+function getSelectedSquareMarkerBlocks(kind) {
+  const config = getSquareMarkerConfig(kind);
+  const selected = getSelectedElements();
+  if (!config || !selected.length || selected.some(el => !el.cctagBlockId || el.cctagBlockKind !== kind)) return [];
+
+  const blockIds = Array.from(new Set(selected.map(el => el.cctagBlockId)));
+  return blockIds
+    .map(blockId => {
+      const fullBlockElements = state.elements.filter(el => el.cctagBlockId === blockId);
+      const marker = fullBlockElements.find(el => el.type === config.type && el.cctagBlockRole === 'marker');
+      const text = fullBlockElements.find(el => el.type === 'text' && el.cctagBlockRole === 'id');
+      const bounds = getMultiElementBounds(fullBlockElements);
+      return marker ? { blockId, elements: fullBlockElements, marker, text, bounds } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.bounds.x - b.bounds.x);
+}
+
+function syncSquareMarkerBlockText(elements, marker) {
+  if (!marker?.cctagBlockId || !isSquareMarkerType(marker.type)) return elements;
+  return elements.map(el => {
+    if (el.cctagBlockId === marker.cctagBlockId && el.cctagBlockRole === 'id') {
+      return { ...el, text: formatSquareMarkerIdText(marker.markerId, marker.aprilTagFamily || marker.arucoDictionary) };
+    }
+    return el;
+  });
+}
+
+function getSquareMarkerIdTextWidth(size) {
+  const fontSize = Number.parseInt(state.textDefaults.fontSize, 10) || DEFAULT_TEXT_DEFAULTS.fontSize;
+  return Math.max(30, Math.round(fontSize * 2.35));
+}
+
+function getSquareMarkerBlockMetrics(kind, size, addIdText = true, orientation = 'landscape', idGap = 4) {
+  const normalizedSize = normalizeSquareMarkerSize(kind, size);
+  const gap = addIdText ? normalizeCCTagGap(idGap, 4, 96) : 0;
+  const textWidth = addIdText ? getSquareMarkerIdTextWidth(normalizedSize) : 0;
+  const fontSize = Number.parseInt(state.textDefaults.fontSize, 10) || DEFAULT_TEXT_DEFAULTS.fontSize;
+  const textHeight = addIdText ? Math.min(normalizedSize, Math.max(12, Math.round(fontSize * 1.35))) : 0;
+  return {
+    size: normalizedSize,
+    gap,
+    textWidth,
+    textHeight,
+    width: textWidth + gap + normalizedSize,
+    height: normalizedSize,
+  };
+}
+
+function getAutoSquareMarkerStripSize(kind, markerCount, addIdText, orientation, idGap = 4, minGap = 3) {
+  const dims = state.renderer.getSingleLabelDimensions();
+  const count = Math.max(1, markerCount);
+  const normalizedMinGap = count > 1 ? normalizeCCTagGap(minGap, 3, 96) : 0;
+  const margin = 2;
+  const config = getSquareMarkerConfig(kind);
+  let lo = config.minSize;
+  let hi = Math.floor(Math.min(dims.width, dims.height));
+  let best = config.minSize;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const metrics = getSquareMarkerBlockMetrics(kind, mid, addIdText, orientation, idGap);
+    const fitsWidth = count * metrics.width + (count - 1) * normalizedMinGap <= dims.width - margin * 2;
+    const fitsHeight = metrics.height <= dims.height - margin * 2;
+    if (fitsWidth && fitsHeight) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+function createSquareMarkerBlockElements(kind, markerId, options = {}) {
+  const config = getSquareMarkerConfig(kind);
+  const family = getSquareMarkerFamily(config, options.family);
+  const normalizedMarkerId = config.normalizeId(markerId, family);
+  const orientation = normalizeCCTagOrientation(options.orientation);
+  const addIdText = options.addIdText ?? true;
+  const zone = options.zone ?? state.activeZone;
+  const metrics = getSquareMarkerBlockMetrics(kind, options.size ?? getDefaultSquareMarkerSize(kind), addIdText, orientation, options.idGap);
+  const blockId = addIdText ? generateSquareMarkerBlockId(kind) : null;
+  const groupId = addIdText ? `grp_${generateId()}` : null;
+  const baseX = options.x;
+  const baseY = options.y;
+  const elements = [];
+
+  if (addIdText) {
+    elements.push({
+      ...createTextElement(formatSquareMarkerIdText(normalizedMarkerId, family), {
+        ...getTextDefaults(),
+        align: 'right',
+        x: baseX,
+        y: baseY + Math.max(0, (metrics.size - metrics.textHeight) / 2),
+        width: metrics.textWidth,
+        height: metrics.textHeight,
+        rotation: orientation === 'portrait' ? 270 : 0,
+        background: 'transparent',
+        zone,
+      }),
+      groupId,
+      cctagBlockId: blockId,
+      cctagBlockRole: 'id',
+      cctagBlockKind: kind,
+      cctagBlockOrientation: orientation,
+    });
+  }
+
+  elements.push({
+    ...config.createElement(normalizedMarkerId, {
+      [config.familyProp]: family,
+      x: baseX + metrics.textWidth + metrics.gap,
+      y: baseY,
+      width: metrics.size,
+      height: metrics.size,
+      rotation: 0,
+      zone,
+    }),
+    ...(addIdText ? {
+      groupId,
+      cctagBlockId: blockId,
+      cctagBlockRole: 'marker',
+      cctagBlockKind: kind,
+      cctagBlockOrientation: orientation,
+    } : {}),
+  });
+
+  return elements;
+}
+
+function addSquareMarkerStrip(kind, options = {}) {
+  const config = getSquareMarkerConfig(kind);
+  const family = getSquareMarkerFamily(config, options.family);
+  const markerIds = (options.markerIds || [])
+    .map(id => config.normalizeId(id, family))
+    .filter((id, index, ids) => ids.indexOf(id) === index)
+    .sort((a, b) => a - b);
+
+  if (!markerIds.length) {
+    setStatus(`Select at least one ${config.label} marker`);
+    return;
+  }
+
+  saveHistory();
+  const addIdText = options.addIdText ?? true;
+  const orientation = normalizeCCTagOrientation(options.orientation);
+  const layout = normalizeCCTagLayout(options.layout);
+  const idGap = normalizeCCTagGap(options.idGap, 4, 96);
+  const minGap = normalizeCCTagGap(options.minGap, 3, 96);
+  const maxGap = Math.max(minGap, normalizeCCTagGap(options.maxGap, 512, 512));
+  const size = normalizeSquareMarkerBuilderSize(
+    kind,
+    options.size,
+    getAutoSquareMarkerStripSize(kind, markerIds.length, addIdText, orientation, idGap, minGap)
+  );
+  const metrics = getSquareMarkerBlockMetrics(kind, size, addIdText, orientation, idGap);
+  const positions = getCCTagStripPositions(markerIds.length, metrics, layout, { minGap, maxGap });
+  const newElements = markerIds.flatMap((markerId, index) =>
+    createSquareMarkerBlockElements(kind, markerId, {
+      family,
+      x: positions[index].x,
+      y: positions[index].y,
+      size,
+      idGap,
+      addIdText,
+      orientation,
+      zone: state.activeZone,
+    })
+  );
+
+  state.elements.push(...newElements);
+  autoCloneIfEnabled();
+  clearPropertiesMode();
+  state.selectedIds = newElements.map(el => el.id);
+  render();
+  updatePropertiesPanel();
+  updateToolbarState();
+  setStatus(markerIds.length === 1
+    ? `${config.label} ${config.formatId(markerIds[0], family)} added`
+    : `${markerIds.length} ${config.label} markers added`);
+}
+
+function getSquareMarkerBlockIdGap(block) {
+  if (!block?.text || !block?.marker) return 0;
+  const textRotation = Math.round(block.text.rotation || 0) % 360;
+  const markerRotation = Math.round(block.marker.rotation || 0) % 360;
+  if (textRotation !== 0 || markerRotation !== 0) return 4;
+  return normalizeCCTagGap(block.marker.x - (block.text.x + block.text.width), 4, 96);
+}
+
+function updateSquareMarkerStripControls(kind, blocks = getSelectedSquareMarkerBlocks(kind)) {
+  const count = blocks.length;
+  $(`#${kind}-strip-selected-count`) && ($(`#${kind}-strip-selected-count`).textContent = `${count} block${count === 1 ? '' : 's'}`);
+  if (!count) return;
+  const first = blocks[0];
+  $(`#${kind}-strip-size`) && ($(`#${kind}-strip-size`).value = String(Math.min(96, Math.round(first.marker.width))));
+  $(`#${kind}-strip-id-gap`) && ($(`#${kind}-strip-id-gap`).value = String(getSquareMarkerBlockIdGap(first)));
+}
+
+function updateSquareMarkerIdTextControls(kind, text) {
+  const controls = $(`#${kind}-id-text-controls`);
+  controls?.classList.toggle('hidden', !text);
+  if (!text) return;
+
+  $(`#prop-${kind}-id-text`) && ($(`#prop-${kind}-id-text`).value = text.text || '');
+  $(`#prop-${kind}-id-font-family`) && ($(`#prop-${kind}-id-font-family`).value = text.fontFamily || 'Inter, sans-serif');
+  $(`#prop-${kind}-id-font-size`) && ($(`#prop-${kind}-id-font-size`).value = String(text.fontSize || 24));
+}
+
+function modifySelectedSquareMarkerIdText(kind, changes) {
+  const blocks = getSelectedSquareMarkerBlocks(kind);
+  const texts = blocks.map(block => block.text).filter(Boolean);
+  const marker = getSelectedSquareMarkerMarker(kind) || getSelectedSquareMarkerBlockMarker(kind) || blocks[0]?.marker;
+  const targets = texts.length ? texts : [getSquareMarkerBlockIdText(marker)].filter(Boolean);
+  if (!targets.length) {
+    state.textDefaults = normalizeTextDefaults({
+      ...state.textDefaults,
+      ...Object.fromEntries(Object.entries(changes).filter(([key]) => TEXT_DEFAULT_KEYS.includes(key))),
+    });
+    saveTextDefaults();
+    return;
+  }
+
+  saveHistory();
+  targets.forEach(text => {
+    state.elements = state.elements.map(el => (
+      el.id === text.id ? { ...el, ...changes } : el
+    ));
+    state.renderer.clearCache(text.id);
+  });
+  autoCloneIfEnabled();
+  render();
+  updatePropertiesPanel();
+}
+
+function reflowSelectedSquareMarkerBlocks(kind, options = {}) {
+  const blocks = getSelectedSquareMarkerBlocks(kind);
+  if (!blocks.length) {
+    setStatus(`Select ${getSquareMarkerConfig(kind)?.label || 'marker'} blocks first`);
+    return;
+  }
+
+  saveHistory();
+  const layout = normalizeCCTagLayout(options.layout);
+  const size = normalizeSquareMarkerBuilderSize(kind, options.size, blocks[0].marker.width);
+  const idGap = normalizeCCTagGap(options.idGap, getSquareMarkerBlockIdGap(blocks[0]), 96);
+  const minGap = normalizeCCTagGap(options.minGap, 3, 96);
+  const maxGap = Math.max(minGap, normalizeCCTagGap(options.maxGap, 512, 512));
+  const metrics = getSquareMarkerBlockMetrics(kind, size, true, 'landscape', idGap);
+  const selectionBounds = getMultiElementBounds(blocks.flatMap(block => block.elements));
+  const positions = getCCTagStripPositions(blocks.length, metrics, layout, {
+    minGap,
+    maxGap,
+    x: selectionBounds.x,
+    width: selectionBounds.width,
+  });
+
+  blocks.forEach((block, index) => {
+    const position = positions[index];
+    const textWidth = block.text ? metrics.textWidth : 0;
+    const textHeight = block.text ? metrics.textHeight : 0;
+    const markerX = position.x + textWidth + (block.text ? idGap : 0);
+    const ids = block.elements.map(el => el.id);
+
+    state.elements = state.elements.map(el => {
+      if (el.id === block.text?.id) {
+        return {
+          ...el,
+          x: position.x,
+          y: position.y + Math.max(0, (size - textHeight) / 2),
+          width: textWidth,
+          height: textHeight,
+          rotation: block.text?.rotation ?? el.rotation ?? 0,
+          align: 'right',
+          background: 'transparent',
+        };
+      }
+      if (el.id === block.marker.id) {
+        return { ...el, x: markerX, y: position.y, width: size, height: size, rotation: block.marker.rotation ?? el.rotation ?? 0 };
+      }
+      return el;
+    });
+    ids.forEach(id => state.renderer.clearCache(id));
+  });
+
+  render();
+  updatePropertiesPanel();
+  updateToolbarState();
+  setStatus(`${blocks.length} ${getSquareMarkerConfig(kind)?.label || 'marker'} block${blocks.length === 1 ? '' : 's'} updated`);
+}
+
+function rotateSquareMarkerBlockTo(marker, targetRotation) {
+  if (!marker?.cctagBlockId || !isSquareMarkerType(marker.type)) return false;
+  const members = state.elements.filter(el => el.cctagBlockId === marker.cctagBlockId);
+  if (members.length < 2) return false;
+  const currentRotation = marker.rotation || 0;
+  const angleDelta = targetRotation - currentRotation;
+  if (angleDelta === 0) return true;
+  const bounds = getMultiElementBounds(members);
+  const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
   state.elements = rotateElements(state.elements, members.map(el => el.id), angleDelta, center);
   members.forEach(el => state.renderer.clearCache(el.id));
   render();
@@ -2859,6 +3523,8 @@ function modifyElement(id, changes) {
   rememberTextDefaultsFromElement(current, changes);
   if (current?.type === 'cctag') {
     changes = normalizeCCTagGeometry(current, changes);
+  } else if (current && isSquareMarkerType(current.type)) {
+    changes = normalizeSquareMarkerGeometry(current, changes);
   }
 
   state.elements = updateElement(state.elements, id, changes);
@@ -2866,10 +3532,14 @@ function modifyElement(id, changes) {
     const updatedMarker = state.elements.find(el => el.id === id);
     state.elements = syncCCTagBlockText(state.elements, updatedMarker);
     clearCCTagBlockCache(updatedMarker);
+  } else if (current && isSquareMarkerType(current.type) && ('markerId' in changes || getSquareMarkerConfig(current.type)?.familyProp in changes)) {
+    const updatedMarker = state.elements.find(el => el.id === id);
+    state.elements = syncSquareMarkerBlockText(state.elements, updatedMarker);
+    clearCCTagBlockCache(updatedMarker);
   }
 
   // Only clear cache if content or size changed (not just position/rotation)
-  const contentKeys = ['width', 'height', 'text', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textDecoration', 'background', 'noWrap', 'clipOverflow', 'autoScale', 'verticalAlign', 'imageData', 'barcodeData', 'barcodeFormat', 'qrData', 'brightness', 'contrast', 'dither', 'showText', 'textFontSize', 'textBold', 'markerId'];
+  const contentKeys = ['width', 'height', 'text', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textDecoration', 'background', 'noWrap', 'clipOverflow', 'autoScale', 'verticalAlign', 'imageData', 'barcodeData', 'barcodeFormat', 'qrData', 'brightness', 'contrast', 'dither', 'showText', 'textFontSize', 'textBold', 'markerId', 'aprilTagFamily', 'arucoDictionary'];
   const needsCacheClear = Object.keys(changes).some(key => contentKeys.includes(key));
   if (needsCacheClear) {
     state.renderer.clearCache(id);
@@ -3000,15 +3670,27 @@ function updateToolbarState() {
 function updatePropertiesPanel() {
   let element = getSelected();
   const selectedCCTagBlocks = getSelectedCCTagBlocks();
+  const selectedAprilTagBlocks = getSelectedSquareMarkerBlocks('apriltag');
+  const selectedArUcoBlocks = getSelectedSquareMarkerBlocks('aruco');
   const cctagBlockMarker = element ? null : getSelectedCCTagBlockMarker();
+  const aprilTagBlockMarker = element ? null : getSelectedSquareMarkerBlockMarker('apriltag');
+  const arucoBlockMarker = element ? null : getSelectedSquareMarkerBlockMarker('aruco');
   const selectedCount = state.selectedIds.length;
   const isCCTagAddMode = !element && !cctagBlockMarker && state.propertiesMode === 'cctag-add';
   const isCCTagStripSelection = !element && !cctagBlockMarker && selectedCCTagBlocks.length > 0;
+  const squareAddMode = !element && state.propertiesMode && state.propertiesMode.endsWith('-add') && state.propertiesMode !== 'cctag-add'
+    ? state.propertiesMode.replace('-add', '')
+    : null;
+  const squareStripMode = selectedAprilTagBlocks.length > 0 ? 'apriltag' : (selectedArUcoBlocks.length > 0 ? 'aruco' : null);
 
   // Handle multi-selection or no selection
-  if (!element && !isCCTagAddMode && !isCCTagStripSelection) {
+  if (!element && !isCCTagAddMode && !isCCTagStripSelection && !squareAddMode && !squareStripMode) {
     if (cctagBlockMarker) {
       element = cctagBlockMarker;
+    } else if (aprilTagBlockMarker) {
+      element = aprilTagBlockMarker;
+    } else if (arucoBlockMarker) {
+      element = arucoBlockMarker;
     } else {
       if (selectedCount > 1) {
         // Multiple elements selected
@@ -3031,16 +3713,18 @@ function updatePropertiesPanel() {
   $('#props-barcode').classList.add('hidden');
   $('#props-qr').classList.add('hidden');
   $('#props-cctag')?.classList.add('hidden');
+  $('#props-apriltag')?.classList.add('hidden');
+  $('#props-aruco')?.classList.add('hidden');
   $('#props-shape').classList.add('hidden');
-  $('#props-transform')?.classList.toggle('hidden', isCCTagAddMode || isCCTagStripSelection);
-  $('#props-transform-divider')?.classList.toggle('hidden', isCCTagAddMode || isCCTagStripSelection);
+  $('#props-transform')?.classList.toggle('hidden', isCCTagAddMode || isCCTagStripSelection || !!squareAddMode || !!squareStripMode);
+  $('#props-transform-divider')?.classList.toggle('hidden', isCCTagAddMode || isCCTagStripSelection || !!squareAddMode || !!squareStripMode);
 
   if (isCCTagAddMode) {
     $('#props-cctag')?.classList.remove('hidden');
-    $('#cctag-edit-controls')?.classList.add('hidden');
+    $('#cctag-edit-controls')?.classList.remove('hidden');
     $('#cctag-add-controls')?.classList.remove('hidden');
     $('#cctag-strip-edit-controls')?.classList.add('hidden');
-    updateCCTagIdTextControls(null);
+    updateCCTagIdTextControls(getDefaultIdTextControlValues());
     populateCCTagGrid($('#cctag-marker-grid'));
     updateCCTagBuilderSelectionUI();
     return;
@@ -3058,9 +3742,56 @@ function updatePropertiesPanel() {
     return;
   }
 
+  if (squareAddMode) {
+    const kind = squareAddMode;
+    const config = getSquareMarkerConfig(kind);
+    if (config) {
+      const family = getSquareMarkerFamily(config);
+      $(`#props-${kind}`)?.classList.remove('hidden');
+      $(`#${kind}-edit-controls`)?.classList.remove('hidden');
+      $(`#${kind}-add-controls`)?.classList.remove('hidden');
+      $(`#${kind}-strip-edit-controls`)?.classList.add('hidden');
+      populateSquareMarkerFamilySelect(kind, $(`#${kind}-${kind === 'aruco' ? 'dictionary' : 'family'}`));
+      populateSquareMarkerFamilySelect(kind, $(`#prop-${kind}-${kind === 'aruco' ? 'dictionary' : 'family'}`));
+      populateSquareMarkerSelect(kind, $(`#prop-${kind}-marker`), family);
+      const builderFamily = $(`#${kind}-${kind === 'aruco' ? 'dictionary' : 'family'}`);
+      if (builderFamily) builderFamily.value = family;
+      populateSquareMarkerGrid(kind, $(`#${kind}-marker-grid`));
+      updateSquareMarkerIdTextControls(kind, getDefaultIdTextControlValues());
+      updateSquareMarkerBuilderSelectionUI(kind);
+      return;
+    }
+  }
+
+  if (squareStripMode) {
+    const kind = squareStripMode;
+    const blocks = kind === 'apriltag' ? selectedAprilTagBlocks : selectedArUcoBlocks;
+    const config = getSquareMarkerConfig(kind);
+    const family = blocks[0]?.marker?.[config.familyProp] || getSquareMarkerFamily(config);
+    $(`#props-${kind}`)?.classList.remove('hidden');
+    $(`#${kind}-edit-controls`)?.classList.remove('hidden');
+    $(`#${kind}-add-controls`)?.classList.remove('hidden');
+    $(`#${kind}-strip-edit-controls`)?.classList.remove('hidden');
+    populateSquareMarkerFamilySelect(kind, $(`#prop-${kind}-${kind === 'aruco' ? 'dictionary' : 'family'}`));
+    populateSquareMarkerFamilySelect(kind, $(`#${kind}-${kind === 'aruco' ? 'dictionary' : 'family'}`));
+    populateSquareMarkerSelect(kind, $(`#prop-${kind}-marker`), family);
+    $(`#prop-${kind}-${kind === 'aruco' ? 'dictionary' : 'family'}`).value = family;
+    $(`#prop-${kind}-marker`).value = String(blocks[0]?.marker?.markerId ?? 0);
+    populateSquareMarkerGrid(kind, $(`#${kind}-marker-grid`));
+    updateSquareMarkerBuilderSelectionUI(kind);
+    updateSquareMarkerStripControls(kind, blocks);
+    updateSquareMarkerIdTextControls(kind, blocks[0]?.text || null);
+    return;
+  }
+
   $('#cctag-edit-controls')?.classList.remove('hidden');
   $('#cctag-add-controls')?.classList.remove('hidden');
   $('#cctag-strip-edit-controls')?.classList.toggle('hidden', selectedCCTagBlocks.length === 0 && !element?.cctagBlockId);
+  ['apriltag', 'aruco'].forEach(kind => {
+    $(`#${kind}-edit-controls`)?.classList.remove('hidden');
+    $(`#${kind}-add-controls`)?.classList.remove('hidden');
+    $(`#${kind}-strip-edit-controls`)?.classList.toggle('hidden', !element?.cctagBlockId || element?.cctagBlockKind !== kind);
+  });
 
   // Update common properties
   $('#prop-x').value = Math.round(element.x);
@@ -3153,6 +3884,25 @@ function updatePropertiesPanel() {
       updateCCTagStripControls(selectedCCTagBlocks.length ? selectedCCTagBlocks : getSelectedCCTagBlocks());
       updateCCTagIdTextControls(getCCTagBlockIdText(element));
       break;
+
+    case 'apriltag':
+    case 'aruco': {
+      const kind = element.type;
+      const config = getSquareMarkerConfig(kind);
+      const familyControlName = kind === 'aruco' ? 'dictionary' : 'family';
+      const family = config.normalizeFamily(element[config.familyProp]);
+      $(`#props-${kind}`)?.classList.remove('hidden');
+      populateSquareMarkerFamilySelect(kind, $(`#prop-${kind}-${familyControlName}`));
+      populateSquareMarkerFamilySelect(kind, $(`#${kind}-${familyControlName}`));
+      populateSquareMarkerSelect(kind, $(`#prop-${kind}-marker`), family);
+      populateSquareMarkerGrid(kind, $(`#${kind}-marker-grid`));
+      $(`#prop-${kind}-${familyControlName}`).value = family;
+      $(`#prop-${kind}-marker`).value = String(config.normalizeId(element.markerId, family));
+      updateSquareMarkerBuilderSelectionUI(kind);
+      updateSquareMarkerStripControls(kind, getSelectedSquareMarkerBlocks(kind));
+      updateSquareMarkerIdTextControls(kind, getSquareMarkerBlockIdText(element));
+      break;
+    }
 
     case 'shape':
       $('#props-shape').classList.remove('hidden');
@@ -3942,7 +4692,7 @@ function handleCanvasMouseMove(e) {
         const resizeEl = state.dragStartElements[0];
         // For images with lockAspectRatio, preserve aspect by default (Shift to unlock)
         // For other elements, Shift preserves aspect
-        const isCCTag = resizeEl.type === 'cctag';
+        const isCCTag = resizeEl.type === 'cctag' || isSquareMarkerType(resizeEl.type);
         const isLockedImage = resizeEl.type === 'image' && resizeEl.lockAspectRatio !== false;
         const preserveAspect = isCCTag ? true : (isLockedImage ? !e.shiftKey : e.shiftKey);
         const newBounds = calculateResize(resizeEl, state.dragHandle, dx, dy, preserveAspect);
@@ -3950,6 +4700,9 @@ function handleCanvasMouseMove(e) {
         break;
 
       case 'group-resize':
+        if (state.dragStartElements?.some(isMarkerBlockMember)) {
+          break;
+        }
         // Multi-element resize - scale from original positions
         const { scaleX, scaleY } = calculateGroupResize(
           state.dragStartBounds,
@@ -4556,7 +5309,7 @@ function handleCanvasPointerMove(e) {
 
       case 'resize': {
         const resizeEl = state.dragStartElements[0];
-        const isCCTag = resizeEl.type === 'cctag';
+        const isCCTag = resizeEl.type === 'cctag' || isSquareMarkerType(resizeEl.type);
         const isLockedImage = resizeEl.type === 'image' && resizeEl.lockAspectRatio !== false;
         const preserveAspect = isCCTag ? true : (isLockedImage ? !e.shiftKey : e.shiftKey);
         const newBounds = calculateResize(resizeEl, state.dragHandle, dx, dy, preserveAspect);
@@ -4565,6 +5318,9 @@ function handleCanvasPointerMove(e) {
       }
 
       case 'group-resize': {
+        if (state.dragStartElements?.some(isMarkerBlockMember)) {
+          break;
+        }
         const { scaleX, scaleY } = calculateGroupResize(
           state.dragStartBounds,
           state.dragHandle,
@@ -5005,6 +5761,7 @@ function handleCanvasTouchMove(e) {
       const resizeEl = state.dragStartElements[0];
       const isLockedAspectElement =
         resizeEl.type === 'cctag' ||
+        isSquareMarkerType(resizeEl.type) ||
         (resizeEl.type === 'image' && resizeEl.lockAspectRatio !== false);
       const newBounds = calculateResize(resizeEl, state.dragHandle, dx, dy, isLockedAspectElement);
       modifyElement(resizeEl.id, constrainSize({ ...resizeEl, ...newBounds }));
@@ -5012,6 +5769,9 @@ function handleCanvasTouchMove(e) {
     }
 
     case 'group-resize': {
+      if (state.dragStartElements?.some(isMarkerBlockMember)) {
+        break;
+      }
       const { scaleX, scaleY } = calculateGroupResize(
         state.dragStartBounds,
         state.dragHandle,
@@ -8022,6 +8782,7 @@ function init() {
   };
   updatePrintSize();
   initCCTagData();
+  initSquareMarkerData();
 
   // Label size
   $('#label-size').addEventListener('change', handleLabelSizeChange);
@@ -8356,6 +9117,77 @@ function init() {
     modifySelectedCCTagIdText({ fontSize: validateFontSize(e.target.value) });
   });
 
+  ['apriltag', 'aruco'].forEach(kind => {
+    const familyControlName = kind === 'aruco' ? 'dictionary' : 'family';
+    const config = getSquareMarkerConfig(kind);
+
+    $(`#add-${kind}-btn`)?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showSquareMarkerPropertiesMode(kind);
+    });
+
+    $(`#${kind}-${familyControlName}`)?.addEventListener('change', (e) => {
+      updateSquareMarkerFamily(kind, e.target.value);
+    });
+
+    $(`#${kind}-add-marker`)?.addEventListener('click', () => {
+      addSquareMarkerStrip(kind, {
+        family: $(`#${kind}-${familyControlName}`)?.value,
+        markerIds: getSquareMarkerBuilderSelection(kind),
+        addIdText: $(`#${kind}-add-id`)?.checked ?? true,
+        layout: $(`#${kind}-layout`)?.value ?? 'even',
+        orientation: $(`#${kind}-orientation`)?.value ?? 'landscape',
+        size: $(`#${kind}-size`)?.value,
+        idGap: $(`#${kind}-id-gap`)?.value,
+        minGap: $(`#${kind}-min-gap`)?.value,
+        maxGap: $(`#${kind}-max-gap`)?.value,
+      });
+    });
+
+    $(`#${kind}-select-all`)?.addEventListener('click', () => {
+      const family = getSquareMarkerFamily(config);
+      setSquareMarkerBuilderSelection(kind, Array.from({ length: config.getMaxId(family) + 1 }, (_, index) => index));
+    });
+
+    $(`#${kind}-clear-selection`)?.addEventListener('click', () => {
+      setSquareMarkerBuilderSelection(kind, []);
+    });
+
+    $(`#${kind}-strip-apply`)?.addEventListener('click', () => {
+      reflowSelectedSquareMarkerBlocks(kind, {
+        layout: $(`#${kind}-strip-layout`)?.value ?? 'even',
+        size: $(`#${kind}-strip-size`)?.value,
+        idGap: $(`#${kind}-strip-id-gap`)?.value,
+        minGap: $(`#${kind}-strip-min-gap`)?.value,
+        maxGap: $(`#${kind}-strip-max-gap`)?.value,
+      });
+    });
+
+    $(`#prop-${kind}-${familyControlName}`)?.addEventListener('change', (e) => {
+      const marker = getSelectedSquareMarkerMarker(kind) || getSelectedSquareMarkerBlockMarker(kind);
+      if (!marker) return;
+      modifyElement(marker.id, { [config.familyProp]: e.target.value });
+    });
+
+    $(`#prop-${kind}-marker`)?.addEventListener('change', (e) => {
+      const marker = getSelectedSquareMarkerMarker(kind) || getSelectedSquareMarkerBlockMarker(kind);
+      if (!marker) return;
+      modifyElement(marker.id, { markerId: e.target.value });
+    });
+
+    $(`#prop-${kind}-id-text`)?.addEventListener('input', (e) => {
+      modifySelectedSquareMarkerIdText(kind, { text: e.target.value });
+    });
+
+    $(`#prop-${kind}-id-font-family`)?.addEventListener('change', (e) => {
+      modifySelectedSquareMarkerIdText(kind, { fontFamily: e.target.value });
+    });
+
+    $(`#prop-${kind}-id-font-size`)?.addEventListener('input', (e) => {
+      modifySelectedSquareMarkerIdText(kind, { fontSize: validateFontSize(e.target.value) });
+    });
+  });
+
   // Shape dropdown toggle
   $('#add-shape-btn').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -8525,6 +9357,9 @@ function init() {
     const target = state.elements.find(el => el.id === id);
     if (target?.type === 'cctag' && target.cctagBlockId && Object.keys(changes).length === 1 && 'rotation' in changes) {
       if (rotateCCTagBlockTo(target, changes.rotation)) return;
+    }
+    if (target && isSquareMarkerType(target.type) && target.cctagBlockId && Object.keys(changes).length === 1 && 'rotation' in changes) {
+      if (rotateSquareMarkerBlockTo(target, changes.rotation)) return;
     }
     modifyElement(id, changes);
   };

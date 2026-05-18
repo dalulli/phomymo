@@ -5,6 +5,8 @@
 
 import { drawHandles, drawGroupHandles } from './handles.js?v=5';
 import { getCCTagRadii } from './cctag.js?v=1';
+import { getAprilTagMatrix } from './apriltag.js?v=2';
+import { getArUcoMatrix } from './aruco.js?v=2';
 import { logError, ErrorLevel } from './utils/errors.js';
 
 // Pixels per mm (203 DPI ≈ 8 px/mm)
@@ -189,6 +191,8 @@ export class CanvasRenderer {
       imageData: e.imageData?.substring(0, 50), // Just enough to detect changes
       barcodeData: e.barcodeData, qrData: e.qrData,
       markerId: e.markerId,
+      aprilTagFamily: e.aprilTagFamily,
+      arucoDictionary: e.arucoDictionary,
       brightness: e.brightness, contrast: e.contrast, dither: e.dither,
     }))) + `_${ditherMode}_${this.labelWidth}_${this.labelHeight}`;
 
@@ -887,6 +891,12 @@ export class CanvasRenderer {
       case 'cctag':
         this.renderCCTagElement(element, width, height);
         break;
+      case 'apriltag':
+        this.renderAprilTagElement(element, width, height);
+        break;
+      case 'aruco':
+        this.renderArUcoElement(element, width, height);
+        break;
       case 'shape':
         this.renderShapeElement(element, width, height);
         break;
@@ -1364,6 +1374,44 @@ export class CanvasRenderer {
       this.ctx.fillStyle = fillColor;
       this.ctx.fill();
       fillColor = fillColor === 'white' ? 'black' : 'white';
+    }
+    this.ctx.restore();
+  }
+
+  renderAprilTagElement(element, width, height) {
+    const matrix = getAprilTagMatrix(element.aprilTagFamily, element.markerId);
+    this.renderMatrixMarker(matrix, width, height);
+  }
+
+  renderArUcoElement(element, width, height) {
+    const matrix = getArUcoMatrix(element.arucoDictionary, element.markerId);
+    this.renderMatrixMarker(matrix, width, height);
+  }
+
+  renderMatrixMarker(matrix, width, height) {
+    if (!matrix) return;
+
+    const size = Math.min(width, height);
+    const cells = matrix.length;
+    const cellSize = size / cells;
+    const start = -size / 2;
+
+    this.ctx.save();
+    this.ctx.fillStyle = 'white';
+    this.ctx.fillRect(start, start, size, size);
+
+    this.ctx.fillStyle = 'black';
+    for (let y = 0; y < cells; y++) {
+      for (let x = 0; x < cells; x++) {
+        if (matrix[y][x]) {
+          this.ctx.fillRect(
+            start + x * cellSize,
+            start + y * cellSize,
+            Math.ceil(cellSize),
+            Math.ceil(cellSize)
+          );
+        }
+      }
     }
     this.ctx.restore();
   }
