@@ -1,7 +1,7 @@
 /**
  * Phomymo Label Designer Application
  * Multi-element label editor with drag, resize, and rotate
- * v117
+ * v118
  */
 
 import { CanvasRenderer } from './canvas.js?v=115';
@@ -9,6 +9,7 @@ import { BLETransport } from './ble.js?v=103';
 import { USBTransport } from './usb.js?v=101';
 import { print, printDensityTest, isDSeriesPrinter, isP12Printer, isA30Printer, isTapePrinter, isPM241Printer, isTSPLPrinter, isRotatedPrinter, getPrinterWidthBytes, getPrinterDpi, getPrinterAlignment, getPrinterDescription, isDeviceRecognized, getMatchedPattern, loadPrinterDefinitions, getAllPrinterDefinitions, getPrinterDefinition, getCustomPrinterDefinitions, saveCustomPrinterDefinition, deleteCustomPrinterDefinition, isBuiltinPrinter, resetBuiltinPrinter, getAvailableProtocols, getAvailableLabelPresets, getDetectedDefinition } from './printer.js?v=128';
 import {
+  generateId,
   createTextElement,
   createImageElement,
   createBarcodeElement,
@@ -16,8 +17,6 @@ import {
   createCCTagElement,
   createShapeElement,
   updateElement,
-  deleteElement,
-  duplicateElement,
   bringToFront,
   sendToBack,
   getElementAtPoint,
@@ -43,6 +42,7 @@ import {
   CCTAG_MIN_ID,
   CCTAG_MIN_SIZE,
   formatCCTagId,
+  getCCTagRadii,
   loadCCTagRadii,
   normalizeCCTagId,
 } from './cctag.js?v=1';
@@ -147,6 +147,37 @@ const $$ = (sel) => document.querySelectorAll(sel);
 // Default to M-series sizes (imported from constants.js)
 let LABEL_SIZES = { ...M_SERIES_LABEL_SIZES, ...M_SERIES_ROUND_LABELS };
 
+const TEXT_DEFAULTS_STORAGE_KEY = 'phomymo_text_defaults';
+const TEXT_DEFAULT_KEYS = [
+  'fontSize',
+  'color',
+  'align',
+  'verticalAlign',
+  'fontFamily',
+  'fontWeight',
+  'fontStyle',
+  'textDecoration',
+  'background',
+  'noWrap',
+  'clipOverflow',
+  'autoScale',
+];
+const DEFAULT_TEXT_DEFAULTS = {
+  fontSize: 24,
+  color: 'black',
+  align: 'left',
+  verticalAlign: 'middle',
+  fontFamily: 'Inter, sans-serif',
+  fontWeight: 'normal',
+  fontStyle: 'normal',
+  textDecoration: 'none',
+  background: 'transparent',
+  noWrap: false,
+  clipOverflow: false,
+  autoScale: false,
+};
+const CCTAG_MAX_BUILDER_SIZE = 96;
+
 // App state
 const state = {
   connectionType: 'ble',
@@ -195,6 +226,11 @@ const state = {
   // Local fonts from system
   localFonts: [],         // Array of { family, fullName, style }
   localFontsEnabled: false, // Whether local fonts have been loaded
+  propertiesMode: null,     // Tool-specific properties view when nothing is selected
+  textDefaults: { ...DEFAULT_TEXT_DEFAULTS },
+  cctagBuilder: {
+    selectedIds: new Set([0]),
+  },
   // Multi-label roll configuration
   multiLabel: {
     enabled: false,
@@ -256,6 +292,52 @@ function saveDeviceMapping(deviceName, printerModel) {
   const mappings = getDeviceMappings();
   mappings[deviceName] = printerModel;
   safeStorageSet(STORAGE_KEYS.DEVICE_MAPPING, safeJsonStringify(mappings));
+}
+
+function normalizeTextDefaults(defaults = {}) {
+  const normalized = { ...DEFAULT_TEXT_DEFAULTS };
+  TEXT_DEFAULT_KEYS.forEach(key => {
+    if (defaults[key] !== undefined) {
+      normalized[key] = defaults[key];
+    }
+  });
+  normalized.fontSize = validateFontSize(normalized.fontSize);
+  normalized.align = ['left', 'center', 'right'].includes(normalized.align) ? normalized.align : DEFAULT_TEXT_DEFAULTS.align;
+  normalized.verticalAlign = ['top', 'middle', 'bottom'].includes(normalized.verticalAlign) ? normalized.verticalAlign : DEFAULT_TEXT_DEFAULTS.verticalAlign;
+  normalized.fontWeight = normalized.fontWeight === 'bold' ? 'bold' : 'normal';
+  normalized.fontStyle = normalized.fontStyle === 'italic' ? 'italic' : 'normal';
+  normalized.textDecoration = normalized.textDecoration === 'underline' ? 'underline' : 'none';
+  normalized.color = normalized.color === 'white' ? 'white' : 'black';
+  normalized.background = ['transparent', 'white', 'black'].includes(normalized.background) ? normalized.background : DEFAULT_TEXT_DEFAULTS.background;
+  normalized.noWrap = !!normalized.noWrap;
+  normalized.clipOverflow = !!normalized.clipOverflow;
+  normalized.autoScale = !!normalized.autoScale;
+  return normalized;
+}
+
+function loadTextDefaults() {
+  state.textDefaults = normalizeTextDefaults(safeJsonParse(safeStorageGet(TEXT_DEFAULTS_STORAGE_KEY), {}));
+}
+
+function saveTextDefaults() {
+  safeStorageSet(TEXT_DEFAULTS_STORAGE_KEY, safeJsonStringify(state.textDefaults));
+}
+
+function getTextDefaults() {
+  return { ...state.textDefaults };
+}
+
+function rememberTextDefaultsFromElement(element, changes = {}) {
+  if (!element || element.type !== 'text') return;
+  const changedKeys = Object.keys(changes).filter(key => TEXT_DEFAULT_KEYS.includes(key));
+  if (!changedKeys.length) return;
+
+  const nextDefaults = { ...state.textDefaults };
+  changedKeys.forEach(key => {
+    nextDefaults[key] = changes[key];
+  });
+  state.textDefaults = normalizeTextDefaults(nextDefaults);
+  saveTextDefaults();
 }
 
 /**
@@ -416,15 +498,191 @@ function populateCCTagSelect(select) {
   }
 }
 
+function generateCCTagBlockId() {
+  return 'cctag_block_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 11);
+}
+
+function getSelectedCCTagMarker() {
+  const selected = getSelectedElements();
+  return selected.find(el => el.type === 'cctag') || null;
+}
+
+function getCCTagBlockIdText(marker) {
+  if (!marker?.cctagBlockId) return null;
+  return state.elements.find(el => el.cctagBlockId === marker.cctagBlockId && el.cctagBlockRole === 'id') || null;
+}
+
+function getSelectedCCTagIdText() {
+  const marker = getSelectedCCTagMarker() || getSelectedCCTagBlockMarker() || getSelectedCCTagBlocks()[0]?.marker;
+  return getCCTagBlockIdText(marker);
+}
+
+function getSelectedCCTagBlockMarker() {
+  const selected = getSelectedElements();
+  if (selected.length < 2) return null;
+  const blockIds = new Set(selected.map(el => el.cctagBlockId).filter(Boolean));
+  const [blockId] = Array.from(blockIds);
+  if (blockIds.size !== 1 || selected.some(el => el.cctagBlockId !== blockId)) {
+    return null;
+  }
+  return selected.find(el => el.type === 'cctag' && el.cctagBlockRole === 'marker') || null;
+}
+
+function getSelectedCCTagBlocks() {
+  const selected = getSelectedElements();
+  if (!selected.length || selected.some(el => !el.cctagBlockId)) return [];
+
+  const blockIds = Array.from(new Set(selected.map(el => el.cctagBlockId)));
+  return blockIds
+    .map(blockId => {
+      const fullBlockElements = state.elements.filter(el => el.cctagBlockId === blockId);
+      const marker = fullBlockElements.find(el => el.type === 'cctag' && el.cctagBlockRole === 'marker');
+      const text = fullBlockElements.find(el => el.type === 'text' && el.cctagBlockRole === 'id');
+      const bounds = getMultiElementBounds(fullBlockElements);
+      return marker ? { blockId, elements: fullBlockElements, marker, text, bounds } : null;
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.bounds.x - b.bounds.x);
+}
+
+function isCCTagBlockMember(element) {
+  return !!element?.cctagBlockId;
+}
+
+function syncCCTagBlockText(elements, marker) {
+  if (!marker?.cctagBlockId) return elements;
+  return elements.map(el => {
+    if (el.cctagBlockId === marker.cctagBlockId && el.cctagBlockRole === 'id') {
+      return { ...el, text: formatCCTagId(marker.markerId) };
+    }
+    return el;
+  });
+}
+
+function clearCCTagBlockCache(marker) {
+  if (!marker?.cctagBlockId || !state.renderer) return;
+  state.elements
+    .filter(el => el.cctagBlockId === marker.cctagBlockId)
+    .forEach(el => state.renderer.clearCache(el.id));
+}
+
+function updateSelectedCCTagMarkerId(value) {
+  const marker = getSelectedCCTagMarker();
+  if (!marker) return;
+  modifyElement(marker.id, { markerId: normalizeCCTagId(value) });
+}
+
+function drawCCTagPreviewCanvas(canvas, markerId) {
+  const radii = getCCTagRadii(markerId);
+  if (!canvas || !radii) return;
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const size = canvas.width;
+  const outerRadius = size / 2 - 1;
+  ctx.clearRect(0, 0, size, size);
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, outerRadius, 0, Math.PI * 2);
+  ctx.fillStyle = 'black';
+  ctx.fill();
+
+  let fillColor = 'white';
+  for (const radiusPercent of radii) {
+    ctx.beginPath();
+    ctx.arc(size / 2, size / 2, outerRadius * (radiusPercent / 100), 0, Math.PI * 2);
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+    fillColor = fillColor === 'white' ? 'black' : 'white';
+  }
+}
+
+function populateCCTagGrid(container) {
+  if (!container || container.dataset.populated === 'true') return;
+
+  for (let id = CCTAG_MIN_ID; id <= CCTAG_MAX_ID; id++) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'cctag-marker-option flex flex-col items-center gap-0.5 rounded border border-gray-200 bg-white p-1 text-[10px] text-gray-600 hover:border-blue-300 hover:bg-blue-50';
+    button.dataset.markerId = String(id);
+    button.setAttribute('aria-pressed', state.cctagBuilder.selectedIds.has(id) ? 'true' : 'false');
+    button.title = `CCTag ${formatCCTagId(id)}`;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 28;
+    canvas.height = 28;
+    drawCCTagPreviewCanvas(canvas, id);
+
+    const label = document.createElement('span');
+    label.textContent = formatCCTagId(id);
+
+    button.append(canvas, label);
+    button.addEventListener('click', () => toggleCCTagBuilderMarker(id));
+    container.appendChild(button);
+  }
+
+  container.dataset.populated = 'true';
+  updateCCTagBuilderSelectionUI();
+}
+
+function toggleCCTagBuilderMarker(markerId) {
+  const normalized = normalizeCCTagId(markerId);
+  if (state.cctagBuilder.selectedIds.has(normalized)) {
+    state.cctagBuilder.selectedIds.delete(normalized);
+  } else {
+    state.cctagBuilder.selectedIds.add(normalized);
+  }
+  updateCCTagBuilderSelectionUI();
+}
+
+function setCCTagBuilderSelection(ids) {
+  state.cctagBuilder.selectedIds = new Set(ids.map(normalizeCCTagId));
+  updateCCTagBuilderSelectionUI();
+}
+
+function getCCTagBuilderSelection() {
+  return Array.from(state.cctagBuilder.selectedIds).sort((a, b) => a - b);
+}
+
+function updateCCTagBuilderSelectionUI() {
+  $$('.cctag-marker-option').forEach(btn => {
+    const selected = state.cctagBuilder.selectedIds.has(normalizeCCTagId(btn.dataset.markerId));
+    btn.classList.toggle('border-blue-500', selected);
+    btn.classList.toggle('bg-blue-50', selected);
+    btn.classList.toggle('text-blue-700', selected);
+    btn.classList.toggle('ring-1', selected);
+    btn.classList.toggle('ring-blue-400', selected);
+    btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
+  });
+
+  const count = state.cctagBuilder.selectedIds.size;
+  $('#cctag-selected-count') && ($('#cctag-selected-count').textContent = `${count} selected`);
+  $('#mobile-cctag-selected-count') && ($('#mobile-cctag-selected-count').textContent = `${count} selected`);
+  $('#cctag-add-marker') && ($('#cctag-add-marker').disabled = count === 0);
+  $('#mobile-cctag-add-marker') && ($('#mobile-cctag-add-marker').disabled = count === 0);
+}
+
+function showCCTagPropertiesMode() {
+  state.propertiesMode = 'cctag-add';
+  state.selectedIds = [];
+  $('#shape-dropdown')?.classList.add('hidden');
+  updateToolbarState();
+  updatePropertiesPanel();
+  render();
+}
+
+function clearPropertiesMode() {
+  state.propertiesMode = null;
+}
+
 function initCCTagData() {
   $('#add-cctag-btn')?.setAttribute('disabled', 'true');
   $('#mobile-add-cctag')?.setAttribute('disabled', 'true');
 
   loadCCTagRadii()
     .then(() => {
-      populateCCTagSelect($('#cctag-marker'));
       populateCCTagSelect($('#prop-cctag-marker'));
-      populateCCTagSelect($('#mobile-cctag-marker'));
+      populateCCTagGrid($('#cctag-marker-grid'));
       $('#add-cctag-btn')?.removeAttribute('disabled');
       $('#mobile-add-cctag')?.removeAttribute('disabled');
       render();
@@ -448,6 +706,13 @@ function normalizeCCTagSize(value) {
   return Math.max(CCTAG_MIN_SIZE, Math.round(parsed));
 }
 
+function normalizeCCTagBuilderSize(value, fallback) {
+  const baseSize = value === undefined || value === null || value === ''
+    ? normalizeCCTagSize(fallback)
+    : normalizeCCTagSize(value);
+  return Math.min(CCTAG_MAX_BUILDER_SIZE, baseSize);
+}
+
 function normalizeCCTagGeometry(element, changes = {}) {
   if (element.type !== 'cctag') return changes;
 
@@ -465,6 +730,366 @@ function normalizeCCTagGeometry(element, changes = {}) {
   }
 
   return normalized;
+}
+
+function normalizeCCTagOrientation(value) {
+  return value === 'portrait' ? 'portrait' : 'landscape';
+}
+
+function normalizeCCTagLayout(value) {
+  return value === 'random' ? 'random' : 'even';
+}
+
+function normalizeCCTagGap(value, fallback, max = 512) {
+  const parsed = Number.parseFloat(value);
+  const resolved = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.max(0, Math.min(max, Math.round(resolved)));
+}
+
+function getCCTagIdTextWidth(size) {
+  const fontSize = Number.parseInt(state.textDefaults.fontSize, 10) || DEFAULT_TEXT_DEFAULTS.fontSize;
+  return Math.max(36, Math.round(size * 0.7), Math.round(fontSize * 2.4));
+}
+
+function getCCTagBlockMetrics(size, addIdText = true, orientation = 'landscape', idGap = 4) {
+  const normalizedSize = normalizeCCTagSize(size);
+  const gap = addIdText ? normalizeCCTagGap(idGap, 4, 96) : 0;
+  const textWidth = addIdText ? getCCTagIdTextWidth(normalizedSize) : 0;
+  const unrotatedWidth = textWidth + gap + normalizedSize;
+  const unrotatedHeight = normalizedSize;
+
+  return {
+    size: normalizedSize,
+    gap,
+    textWidth,
+    unrotatedWidth,
+    unrotatedHeight,
+    width: unrotatedWidth,
+    height: unrotatedHeight,
+  };
+}
+
+function getAutoCCTagStripSize(markerCount, addIdText, orientation, idGap = 4, minGap = 3) {
+  const dims = state.renderer.getSingleLabelDimensions();
+  const count = Math.max(1, markerCount);
+  const normalizedMinGap = count > 1 ? normalizeCCTagGap(minGap, 3, 96) : 0;
+  const margin = 2;
+  let lo = CCTAG_MIN_SIZE;
+  let hi = Math.floor(Math.min(dims.width, dims.height));
+  let best = CCTAG_MIN_SIZE;
+
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const metrics = getCCTagBlockMetrics(mid, addIdText, orientation, idGap);
+    const fitsWidth = count * metrics.width + (count - 1) * normalizedMinGap <= dims.width - margin * 2;
+    const fitsHeight = metrics.height <= dims.height - margin * 2;
+
+    if (fitsWidth && fitsHeight) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+
+  return best;
+}
+
+function getCCTagStripPositions(markerCount, metrics, layout, options = {}) {
+  const dims = state.renderer.getSingleLabelDimensions();
+  const count = Math.max(1, markerCount);
+  const minGap = count > 1 ? normalizeCCTagGap(options.minGap, 3, 96) : 0;
+  const maxGap = count > 1 ? Math.max(minGap, normalizeCCTagGap(options.maxGap, 512, 512)) : 0;
+  const layoutMode = normalizeCCTagLayout(layout);
+  const stripX = Number.isFinite(options.x) ? options.x : 0;
+  const stripWidth = Math.max(metrics.width, Number.isFinite(options.width) ? options.width : dims.width);
+  const y = Math.max(0, (dims.height - metrics.height) / 2);
+
+  if (count === 1) {
+    return [{ x: stripX + Math.max(0, (stripWidth - metrics.width) / 2), y }];
+  }
+
+  const totalBlockWidth = count * metrics.width;
+  const availableGap = Math.max(0, stripWidth - totalBlockWidth);
+  const positions = [];
+
+  if (layoutMode === 'random') {
+    const gapCount = count - 1;
+    const minTotalGap = minGap * gapCount;
+    const maxTotalGap = maxGap * gapCount;
+    const targetGapTotal = Math.max(minTotalGap, Math.min(availableGap, maxTotalGap));
+    const gaps = Array.from({ length: gapCount }, () => minGap);
+    let remaining = targetGapTotal - minTotalGap;
+    let availableIndexes = gaps.map((_, index) => index);
+
+    while (remaining > 0.001 && availableIndexes.length) {
+      const weights = availableIndexes.map(() => Math.random() + 0.1);
+      const totalWeight = weights.reduce((sum, value) => sum + value, 0);
+      const nextIndexes = [];
+
+      availableIndexes.forEach((gapIndex, index) => {
+        const capacity = maxGap - gaps[gapIndex];
+        const addition = Math.min(capacity, remaining * (weights[index] / totalWeight));
+        gaps[gapIndex] += addition;
+        if (capacity - addition > 0.001) {
+          nextIndexes.push(gapIndex);
+        }
+      });
+
+      const usedGapTotal = gaps.reduce((sum, gap) => sum + gap, 0);
+      remaining = targetGapTotal - usedGapTotal;
+      availableIndexes = nextIndexes;
+    }
+
+    const usedWidth = totalBlockWidth + gaps.reduce((sum, gap) => sum + gap, 0);
+    let x = stripX + Math.max(0, (stripWidth - usedWidth) / 2);
+
+    for (let index = 0; index < count; index++) {
+      positions.push({ x, y });
+      x += metrics.width + (gaps[index] || 0);
+    }
+    return positions;
+  }
+
+  const gap = Math.min(maxGap, Math.max(minGap, availableGap / (count - 1)));
+  const totalWidth = totalBlockWidth + gap * (count - 1);
+  let x = stripX + Math.max(0, (stripWidth - totalWidth) / 2);
+  for (let index = 0; index < count; index++) {
+    positions.push({ x, y });
+    x += metrics.width + gap;
+  }
+  return positions;
+}
+
+function createCCTagBlockElements(markerId, options = {}) {
+  const normalizedMarkerId = normalizeCCTagId(markerId);
+  const orientation = normalizeCCTagOrientation(options.orientation);
+  const addIdText = options.addIdText ?? true;
+  const zone = options.zone ?? state.activeZone;
+  const metrics = getCCTagBlockMetrics(options.size ?? getDefaultCCTagSize(), addIdText, orientation, options.idGap);
+  const blockId = addIdText ? generateCCTagBlockId() : null;
+  const groupId = addIdText ? `grp_${generateId()}` : null;
+  const baseX = options.x;
+  const baseY = options.y;
+  const elements = [];
+
+  if (addIdText) {
+    elements.push({
+      ...createTextElement(formatCCTagId(normalizedMarkerId), {
+        ...getTextDefaults(),
+        align: 'right',
+        x: baseX,
+        y: baseY,
+        width: metrics.textWidth,
+        height: metrics.size,
+        rotation: orientation === 'portrait' ? 270 : 0,
+        zone,
+      }),
+      groupId,
+      cctagBlockId: blockId,
+      cctagBlockRole: 'id',
+      cctagBlockOrientation: orientation,
+    });
+  }
+
+  elements.push({
+    ...createCCTagElement(normalizedMarkerId, {
+      x: baseX + metrics.textWidth + metrics.gap,
+      y: baseY,
+      width: metrics.size,
+      height: metrics.size,
+      rotation: 0,
+      zone,
+    }),
+    ...(addIdText ? {
+      groupId,
+      cctagBlockId: blockId,
+      cctagBlockRole: 'marker',
+      cctagBlockOrientation: orientation,
+    } : {}),
+  });
+
+  return elements;
+}
+
+function addCCTagStrip(options = {}) {
+  const markerIds = (options.markerIds || [])
+    .map(normalizeCCTagId)
+    .filter((id, index, ids) => ids.indexOf(id) === index)
+    .sort((a, b) => a - b);
+
+  if (!markerIds.length) {
+    setStatus('Select at least one CCTag marker');
+    return;
+  }
+
+  saveHistory();
+
+  const addIdText = options.addIdText ?? true;
+  const orientation = normalizeCCTagOrientation(options.orientation);
+  const layout = normalizeCCTagLayout(options.layout);
+  const idGap = normalizeCCTagGap(options.idGap, 4, 96);
+  const minGap = normalizeCCTagGap(options.minGap, 3, 96);
+  const maxGap = Math.max(minGap, normalizeCCTagGap(options.maxGap, 512, 512));
+  const size = normalizeCCTagBuilderSize(
+    options.size,
+    getAutoCCTagStripSize(markerIds.length, addIdText, orientation, idGap, minGap)
+  );
+  const metrics = getCCTagBlockMetrics(size, addIdText, orientation, idGap);
+  const positions = getCCTagStripPositions(markerIds.length, metrics, layout, { minGap, maxGap });
+  const newElements = markerIds.flatMap((markerId, index) =>
+    createCCTagBlockElements(markerId, {
+      x: positions[index].x,
+      y: positions[index].y,
+      size,
+      idGap,
+      addIdText,
+      orientation,
+      zone: state.activeZone,
+    })
+  );
+
+  state.elements.push(...newElements);
+  autoCloneIfEnabled();
+  clearPropertiesMode();
+  state.selectedIds = newElements.map(el => el.id);
+  render();
+  updatePropertiesPanel();
+  updateToolbarState();
+  if (state.mobile.propsOpen) {
+    populateMobileProps();
+  }
+  setStatus(markerIds.length === 1
+    ? `CCTag ${formatCCTagId(markerIds[0])} added`
+    : `${markerIds.length} CCTag markers added`);
+}
+
+function getCCTagBlockIdGap(block) {
+  if (!block?.text || !block?.marker) return 0;
+  const textRotation = Math.round(block.text.rotation || 0) % 360;
+  const markerRotation = Math.round(block.marker.rotation || 0) % 360;
+  if (textRotation !== 0 || markerRotation !== 0) return 4;
+  return normalizeCCTagGap(block.marker.x - (block.text.x + block.text.width), 4, 96);
+}
+
+function updateCCTagStripControls(blocks = getSelectedCCTagBlocks()) {
+  const count = blocks.length;
+  $('#cctag-strip-selected-count') && ($('#cctag-strip-selected-count').textContent = `${count} block${count === 1 ? '' : 's'}`);
+  if (!count) return;
+
+  const first = blocks[0];
+  $('#cctag-strip-size') && ($('#cctag-strip-size').value = String(Math.min(CCTAG_MAX_BUILDER_SIZE, Math.round(first.marker.width))));
+  $('#cctag-strip-id-gap') && ($('#cctag-strip-id-gap').value = String(getCCTagBlockIdGap(first)));
+}
+
+function updateCCTagIdTextControls(text = getSelectedCCTagIdText()) {
+  const controls = $('#cctag-id-text-controls');
+  controls?.classList.toggle('hidden', !text);
+  if (!text) return;
+
+  $('#prop-cctag-id-text') && ($('#prop-cctag-id-text').value = text.text || '');
+  $('#prop-cctag-id-font-family') && ($('#prop-cctag-id-font-family').value = text.fontFamily || 'Inter, sans-serif');
+  $('#prop-cctag-id-font-size') && ($('#prop-cctag-id-font-size').value = String(text.fontSize || 24));
+}
+
+function modifySelectedCCTagIdText(changes) {
+  const blocks = getSelectedCCTagBlocks();
+  const texts = blocks.map(block => block.text).filter(Boolean);
+  const targets = texts.length ? texts : [getSelectedCCTagIdText()].filter(Boolean);
+  if (!targets.length) return;
+
+  saveHistory();
+  targets.forEach(text => {
+    state.elements = state.elements.map(el => (
+      el.id === text.id
+        ? { ...el, ...changes }
+        : el
+    ));
+    state.renderer.clearCache(text.id);
+  });
+  autoCloneIfEnabled();
+  render();
+  updatePropertiesPanel();
+}
+
+function reflowSelectedCCTagBlocks(options = {}) {
+  const blocks = getSelectedCCTagBlocks();
+  if (!blocks.length) {
+    setStatus('Select CCTag blocks first');
+    return;
+  }
+
+  saveHistory();
+  const layout = normalizeCCTagLayout(options.layout);
+  const size = normalizeCCTagBuilderSize(options.size, blocks[0].marker.width);
+  const idGap = normalizeCCTagGap(options.idGap, getCCTagBlockIdGap(blocks[0]), 96);
+  const minGap = normalizeCCTagGap(options.minGap, 3, 96);
+  const maxGap = Math.max(minGap, normalizeCCTagGap(options.maxGap, 512, 512));
+  const metrics = getCCTagBlockMetrics(size, true, 'landscape', idGap);
+  const selectionBounds = getMultiElementBounds(blocks.flatMap(block => block.elements));
+  const positions = getCCTagStripPositions(blocks.length, metrics, layout, {
+    minGap,
+    maxGap,
+    x: selectionBounds.x,
+    width: selectionBounds.width,
+  });
+
+  blocks.forEach((block, index) => {
+    const position = positions[index];
+    const textWidth = block.text ? metrics.textWidth : 0;
+    const markerX = position.x + textWidth + (block.text ? idGap : 0);
+    const ids = block.elements.map(el => el.id);
+
+    state.elements = state.elements.map(el => {
+      if (el.id === block.text?.id) {
+        return {
+          ...el,
+          x: position.x,
+          y: position.y,
+          width: textWidth,
+          height: size,
+          rotation: 0,
+          align: 'right',
+        };
+      }
+      if (el.id === block.marker.id) {
+        return {
+          ...el,
+          x: markerX,
+          y: position.y,
+          width: size,
+          height: size,
+          rotation: 0,
+        };
+      }
+      return el;
+    });
+    ids.forEach(id => state.renderer.clearCache(id));
+  });
+
+  render();
+  updatePropertiesPanel();
+  updateToolbarState();
+  setStatus(`${blocks.length} CCTag block${blocks.length === 1 ? '' : 's'} updated`);
+}
+
+function rotateCCTagBlockTo(marker, targetRotation) {
+  if (!marker?.cctagBlockId) return false;
+  const members = state.elements.filter(el => el.cctagBlockId === marker.cctagBlockId);
+  if (members.length < 2) return false;
+  const currentRotation = marker.rotation || 0;
+  const angleDelta = targetRotation - currentRotation;
+  if (angleDelta === 0) return true;
+  const bounds = getMultiElementBounds(members);
+  const center = {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2,
+  };
+  state.elements = rotateElements(state.elements, members.map(el => el.id), angleDelta, center);
+  members.forEach(el => state.renderer.clearCache(el.id));
+  render();
+  updatePropertiesPanel();
+  return true;
 }
 
 /**
@@ -2162,6 +2787,7 @@ function getSelected() {
 function selectElement(id, addToSelection = false) {
   const element = state.elements.find(e => e.id === id);
   if (!element) return;
+  clearPropertiesMode();
 
   // If element is in a group, get all group members
   let idsToSelect = [id];
@@ -2190,6 +2816,7 @@ function selectElement(id, addToSelection = false) {
 function toggleElementSelection(id) {
   const element = state.elements.find(e => e.id === id);
   if (!element) return;
+  clearPropertiesMode();
 
   // If element is in a group, toggle entire group
   let idsToToggle = [id];
@@ -2217,6 +2844,7 @@ function toggleElementSelection(id) {
  * Deselect all elements
  */
 function deselect() {
+  clearPropertiesMode();
   state.selectedIds = [];
   updateToolbarState();
   updatePropertiesPanel();
@@ -2228,11 +2856,17 @@ function deselect() {
  */
 function modifyElement(id, changes) {
   const current = state.elements.find(el => el.id === id);
+  rememberTextDefaultsFromElement(current, changes);
   if (current?.type === 'cctag') {
     changes = normalizeCCTagGeometry(current, changes);
   }
 
   state.elements = updateElement(state.elements, id, changes);
+  if (current?.type === 'cctag' && 'markerId' in changes) {
+    const updatedMarker = state.elements.find(el => el.id === id);
+    state.elements = syncCCTagBlockText(state.elements, updatedMarker);
+    clearCCTagBlockCache(updatedMarker);
+  }
 
   // Only clear cache if content or size changed (not just position/rotation)
   const contentKeys = ['width', 'height', 'text', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textDecoration', 'background', 'noWrap', 'clipOverflow', 'autoScale', 'verticalAlign', 'imageData', 'barcodeData', 'barcodeFormat', 'qrData', 'brightness', 'contrast', 'dither', 'showText', 'textFontSize', 'textBold', 'markerId'];
@@ -2340,7 +2974,7 @@ function updateToolbarState() {
   const hasGroupedElements = selectedElements.some(e => e.groupId);
   // Check if all selected elements are in the same group
   const groupIds = new Set(selectedElements.map(e => e.groupId).filter(Boolean));
-  const canUngroup = groupIds.size === 1 && hasGroupedElements;
+  const canUngroup = groupIds.size === 1 && hasGroupedElements && !selectedElements.some(isCCTagBlockMember);
 
   $('#duplicate-btn').disabled = !hasSelection;
   $('#delete-btn').disabled = !hasSelection;
@@ -2364,24 +2998,69 @@ function updateToolbarState() {
  * Update properties panel for selected element
  */
 function updatePropertiesPanel() {
-  const element = getSelected();
+  let element = getSelected();
+  const selectedCCTagBlocks = getSelectedCCTagBlocks();
+  const cctagBlockMarker = element ? null : getSelectedCCTagBlockMarker();
   const selectedCount = state.selectedIds.length;
+  const isCCTagAddMode = !element && !cctagBlockMarker && state.propertiesMode === 'cctag-add';
+  const isCCTagStripSelection = !element && !cctagBlockMarker && selectedCCTagBlocks.length > 0;
 
   // Handle multi-selection or no selection
-  if (!element) {
-    if (selectedCount > 1) {
-      // Multiple elements selected
-      $('#props-empty').innerHTML = `<span class="text-gray-500">${selectedCount} elements selected</span>`;
+  if (!element && !isCCTagAddMode && !isCCTagStripSelection) {
+    if (cctagBlockMarker) {
+      element = cctagBlockMarker;
     } else {
-      $('#props-empty').innerHTML = '<span class="text-gray-400">Select an element to edit</span>';
+      if (selectedCount > 1) {
+        // Multiple elements selected
+        $('#props-empty').innerHTML = `<span class="text-gray-500">${selectedCount} elements selected</span>`;
+      } else {
+        $('#props-empty').innerHTML = '<span class="text-gray-400">Select an element to edit</span>';
+      }
+      $('#props-empty').classList.remove('hidden');
+      $('#props-content').classList.add('hidden');
+      return;
     }
-    $('#props-empty').classList.remove('hidden');
-    $('#props-content').classList.add('hidden');
-    return;
   }
 
   $('#props-empty').classList.add('hidden');
   $('#props-content').classList.remove('hidden');
+
+  // Hide all type-specific panels
+  $('#props-text').classList.add('hidden');
+  $('#props-image').classList.add('hidden');
+  $('#props-barcode').classList.add('hidden');
+  $('#props-qr').classList.add('hidden');
+  $('#props-cctag')?.classList.add('hidden');
+  $('#props-shape').classList.add('hidden');
+  $('#props-transform')?.classList.toggle('hidden', isCCTagAddMode || isCCTagStripSelection);
+  $('#props-transform-divider')?.classList.toggle('hidden', isCCTagAddMode || isCCTagStripSelection);
+
+  if (isCCTagAddMode) {
+    $('#props-cctag')?.classList.remove('hidden');
+    $('#cctag-edit-controls')?.classList.add('hidden');
+    $('#cctag-add-controls')?.classList.remove('hidden');
+    $('#cctag-strip-edit-controls')?.classList.add('hidden');
+    updateCCTagIdTextControls(null);
+    populateCCTagGrid($('#cctag-marker-grid'));
+    updateCCTagBuilderSelectionUI();
+    return;
+  }
+
+  if (isCCTagStripSelection) {
+    $('#props-cctag')?.classList.remove('hidden');
+    $('#cctag-edit-controls')?.classList.remove('hidden');
+    $('#cctag-add-controls')?.classList.remove('hidden');
+    $('#cctag-strip-edit-controls')?.classList.remove('hidden');
+    populateCCTagGrid($('#cctag-marker-grid'));
+    updateCCTagBuilderSelectionUI();
+    updateCCTagStripControls(selectedCCTagBlocks);
+    updateCCTagIdTextControls(selectedCCTagBlocks[0]?.text || null);
+    return;
+  }
+
+  $('#cctag-edit-controls')?.classList.remove('hidden');
+  $('#cctag-add-controls')?.classList.remove('hidden');
+  $('#cctag-strip-edit-controls')?.classList.toggle('hidden', selectedCCTagBlocks.length === 0 && !element?.cctagBlockId);
 
   // Update common properties
   $('#prop-x').value = Math.round(element.x);
@@ -2394,14 +3073,6 @@ function updatePropertiesPanel() {
   const layerIndex = state.elements.findIndex(el => el.id === element.id);
   $('#prop-layer').textContent = layerIndex + 1;
   $('#prop-layer-total').textContent = state.elements.length;
-
-  // Hide all type-specific panels
-  $('#props-text').classList.add('hidden');
-  $('#props-image').classList.add('hidden');
-  $('#props-barcode').classList.add('hidden');
-  $('#props-qr').classList.add('hidden');
-  $('#props-cctag')?.classList.add('hidden');
-  $('#props-shape').classList.add('hidden');
 
   // Show and populate type-specific panel
   switch (element.type) {
@@ -2476,7 +3147,11 @@ function updatePropertiesPanel() {
     case 'cctag':
       $('#props-cctag')?.classList.remove('hidden');
       populateCCTagSelect($('#prop-cctag-marker'));
+      populateCCTagGrid($('#cctag-marker-grid'));
       $('#prop-cctag-marker').value = String(normalizeCCTagId(element.markerId));
+      updateCCTagBuilderSelectionUI();
+      updateCCTagStripControls(selectedCCTagBlocks.length ? selectedCCTagBlocks : getSelectedCCTagBlocks());
+      updateCCTagIdTextControls(getCCTagBlockIdText(element));
       break;
 
     case 'shape':
@@ -4516,6 +5191,7 @@ function addTextElement() {
   saveHistory();
   const dims = state.renderer.getSingleLabelDimensions();
   const element = createTextElement('New Text', {
+    ...getTextDefaults(),
     x: dims.width / 2 - 75,
     y: dims.height / 2 - 20,
     width: 150,
@@ -4622,45 +5298,13 @@ function addQRElement() {
  * Add a new CCTag marker element, optionally with a normal text ID label
  */
 function addCCTagElement(options = {}) {
-  saveHistory();
-
-  const markerId = normalizeCCTagId(options.markerId ?? 0);
-  const addIdText = options.addIdText ?? true;
-  const size = normalizeCCTagSize(options.size ?? getDefaultCCTagSize());
-  const dims = state.renderer.getSingleLabelDimensions();
-  const gap = 4;
-  const textWidth = addIdText ? Math.max(36, Math.round(size * 0.7)) : 0;
-  const totalWidth = textWidth + (addIdText ? gap : 0) + size;
-  const startX = Math.max(0, (dims.width - totalWidth) / 2);
-  const y = Math.max(0, (dims.height - size) / 2);
-
-  let cctagX = startX;
-  if (addIdText) {
-    const idText = createTextElement(`(${formatCCTagId(markerId)})`, {
-      x: startX,
-      y,
-      width: textWidth,
-      height: size,
-      fontSize: Math.max(10, Math.round(size * 0.22)),
-      align: 'right',
-      verticalAlign: 'middle',
-      zone: state.activeZone,
-    });
-    state.elements.push(idText);
-    cctagX = startX + textWidth + gap;
-  }
-
-  const element = createCCTagElement(markerId, {
-    x: cctagX,
-    y,
-    width: size,
-    height: size,
-    zone: state.activeZone,
+  addCCTagStrip({
+    markerIds: [normalizeCCTagId(options.markerId ?? 0)],
+    addIdText: options.addIdText ?? true,
+    orientation: options.orientation ?? 'landscape',
+    layout: 'even',
+    size: options.size,
   });
-  state.elements.push(element);
-  autoCloneIfEnabled();
-  selectElement(element.id);
-  setStatus(`CCTag ${formatCCTagId(markerId)} added`);
 }
 
 /**
@@ -5529,16 +6173,7 @@ function handleKeyDown(e) {
   if (e.key === 'Delete' || e.key === 'Backspace') {
     if (hasSelection && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
       e.preventDefault();
-      saveHistory();
-      const count = selectedElements.length;
-      // Delete all selected elements and clear their cache
-      state.selectedIds.forEach(id => {
-        state.renderer.clearCache(id);
-        state.elements = deleteElement(state.elements, id);
-      });
-      autoCloneIfEnabled();
-      deselect();
-      setStatus(count > 1 ? `${count} elements deleted` : 'Element deleted');
+      deleteSelectedElements();
     }
   }
 
@@ -5578,18 +6213,7 @@ function handleKeyDown(e) {
   // Ctrl/Cmd + D to duplicate
   if ((e.ctrlKey || e.metaKey) && e.key === 'd' && hasSelection) {
     e.preventDefault();
-    saveHistory();
-    // Duplicate all selected elements
-    const newIds = [];
-    selectedElements.forEach(el => {
-      state.elements = duplicateElement(state.elements, el.id);
-      newIds.push(state.elements[state.elements.length - 1].id);
-    });
-    autoCloneIfEnabled();
-    state.selectedIds = newIds;
-    updateToolbarState();
-    render();
-    setStatus(selectedElements.length > 1 ? `${selectedElements.length} elements duplicated` : 'Element duplicated');
+    duplicateSelectedElements();
   }
 
   // Ctrl/Cmd + G to group
@@ -5626,6 +6250,62 @@ function handleKeyDown(e) {
   }
 }
 
+function cloneElementsWithRemappedLinks(elements, { offsetX = 0, offsetY = 0, zone = null } = {}) {
+  const groupIdMap = new Map();
+  const blockIdMap = new Map();
+
+  return elements.map(el => {
+    const clone = JSON.parse(JSON.stringify(el));
+    clone.id = generateId();
+    clone.x += offsetX;
+    clone.y += offsetY;
+    if (zone !== null) clone.zone = zone;
+
+    if (clone.groupId) {
+      if (!groupIdMap.has(clone.groupId)) {
+        groupIdMap.set(clone.groupId, `grp_${generateId()}`);
+      }
+      clone.groupId = groupIdMap.get(clone.groupId);
+    }
+
+    if (clone.cctagBlockId) {
+      if (!blockIdMap.has(clone.cctagBlockId)) {
+        blockIdMap.set(clone.cctagBlockId, generateCCTagBlockId());
+      }
+      clone.cctagBlockId = blockIdMap.get(clone.cctagBlockId);
+    }
+
+    return clone;
+  });
+}
+
+function duplicateSelectedElements() {
+  const selectedElements = getSelectedElements();
+  if (!selectedElements.length) return;
+
+  saveHistory();
+  const newElements = cloneElementsWithRemappedLinks(selectedElements, { offsetX: 20, offsetY: 20 });
+  state.elements.push(...newElements);
+  autoCloneIfEnabled();
+  state.selectedIds = newElements.map(el => el.id);
+  updateToolbarState();
+  updatePropertiesPanel();
+  render();
+  setStatus(selectedElements.length > 1 ? `${selectedElements.length} elements duplicated` : 'Element duplicated');
+}
+
+function deleteSelectedElements() {
+  const idsToDelete = [...state.selectedIds];
+  if (!idsToDelete.length) return;
+
+  saveHistory();
+  idsToDelete.forEach(id => state.renderer.clearCache(id));
+  state.elements = state.elements.filter(el => !idsToDelete.includes(el.id));
+  autoCloneIfEnabled();
+  deselect();
+  setStatus(idsToDelete.length > 1 ? `${idsToDelete.length} elements deleted` : 'Element deleted');
+}
+
 /**
  * Group selected elements
  */
@@ -5657,6 +6337,11 @@ function handleGroup() {
 function handleUngroup() {
   const selectedElements = getSelectedElements();
   const groupIds = new Set(selectedElements.map(e => e.groupId).filter(Boolean));
+
+  if (selectedElements.some(isCCTagBlockMember)) {
+    showToast('CCTag blocks stay linked', 'warning');
+    return;
+  }
 
   if (groupIds.size === 0) {
     showToast('No groups to ungroup', 'warning');
@@ -5721,16 +6406,10 @@ function pasteElements() {
 
   saveHistory();
 
-  // Offset pasted elements by 10px and set to active zone
-  const newElements = state.clipboard.map(el => {
-    const clone = JSON.parse(JSON.stringify(el));
-    clone.id = 'el_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 9);
-    clone.x += 10;
-    clone.y += 10;
-    clone.zone = state.activeZone; // Paste to active zone
-    // Clear group id on paste
-    delete clone.groupId;
-    return clone;
+  const newElements = cloneElementsWithRemappedLinks(state.clipboard, {
+    offsetX: 10,
+    offsetY: 10,
+    zone: state.activeZone,
   });
 
   state.elements.push(...newElements);
@@ -6115,17 +6794,8 @@ function initMobileUI() {
   $('#mobile-add-qr')?.addEventListener('click', () => addQRElement());
   $('#mobile-add-cctag')?.addEventListener('click', () => {
     closeMobileMenu();
-    $('#mobile-cctag-menu')?.classList.toggle('hidden');
-  });
-  $('#mobile-cctag-add-marker')?.addEventListener('click', () => {
-    addCCTagElement({
-      markerId: $('#mobile-cctag-marker')?.value ?? 0,
-      addIdText: $('#mobile-cctag-add-id')?.checked ?? true,
-    });
-    $('#mobile-cctag-menu')?.classList.add('hidden');
-  });
-  $('#mobile-cctag-close')?.addEventListener('click', () => {
-    $('#mobile-cctag-menu')?.classList.add('hidden');
+    showCCTagPropertiesMode();
+    openMobileProps();
   });
 
   // Edit button - open properties panel
@@ -6134,27 +6804,11 @@ function initMobileUI() {
 
   // Selection actions
   $('#mobile-duplicate-btn')?.addEventListener('click', () => {
-    const selected = getSelected();
-    if (selected) {
-      saveHistory();
-      state.elements = duplicateElement(state.elements, selected.id);
-      autoCloneIfEnabled();
-      selectElement(state.elements[state.elements.length - 1].id);
-      setStatus('Element duplicated');
-    }
+    duplicateSelectedElements();
   });
 
   $('#mobile-delete-btn')?.addEventListener('click', () => {
-    if (state.selectedIds.length > 0) {
-      saveHistory();
-      state.selectedIds.forEach(id => {
-        state.renderer.clearCache(id);
-        state.elements = deleteElement(state.elements, id);
-      });
-      autoCloneIfEnabled();
-      deselect();
-      setStatus('Element deleted');
-    }
+    deleteSelectedElements();
   });
 
   $('#mobile-raise-btn')?.addEventListener('click', () => {
@@ -6241,8 +6895,9 @@ function populateMobileProps() {
   const title = $('#mobile-props-title');
   if (!content || !title) return;
 
-  const selected = getSelected();
-  if (!selected) {
+  const selected = getSelected() || getSelectedCCTagBlockMarker();
+  const isCCTagAddMode = !selected && state.propertiesMode === 'cctag-add';
+  if (!selected && !isCCTagAddMode) {
     content.innerHTML = '<p class="text-gray-500 text-center py-4">No element selected</p>';
     title.textContent = 'Properties';
     return;
@@ -6252,12 +6907,12 @@ function populateMobileProps() {
   const typeNames = {
     text: 'Text',
     image: 'Image',
-    shape: selected.shapeType ? selected.shapeType.charAt(0).toUpperCase() + selected.shapeType.slice(1) : 'Shape',
+    shape: selected?.shapeType ? selected.shapeType.charAt(0).toUpperCase() + selected.shapeType.slice(1) : 'Shape',
     barcode: 'Barcode',
     qr: 'QR Code',
     cctag: 'CCTag',
   };
-  title.textContent = typeNames[selected.type] || 'Properties';
+  title.textContent = isCCTagAddMode ? 'CCTag' : (typeNames[selected.type] || 'Properties');
 
   // Generate properties form
   let html = '<div class="space-y-4">';
@@ -6279,7 +6934,7 @@ function populateMobileProps() {
   };
 
   // Type-specific properties FIRST (content is most important on mobile)
-  if (selected.type === 'text') {
+  if (selected?.type === 'text') {
     const fontFamily = selected.fontFamily || 'Inter, sans-serif';
     const vAlign = selected.verticalAlign || 'middle';
     const textColor = selected.color || 'black';
@@ -6402,7 +7057,7 @@ function populateMobileProps() {
         </div>
       </div>
     `;
-  } else if (selected.type === 'barcode') {
+  } else if (selected?.type === 'barcode') {
     html += `
       <div class="prop-group">
         <div class="flex items-center justify-between mb-1">
@@ -6446,7 +7101,7 @@ function populateMobileProps() {
         </div>
       </div>
     `;
-  } else if (selected.type === 'qr') {
+  } else if (selected?.type === 'qr') {
     html += `
       <div class="prop-group">
         <div class="flex items-center justify-between mb-1">
@@ -6462,21 +7117,73 @@ function populateMobileProps() {
         <textarea id="mobile-prop-value" class="prop-input" rows="3">${escapeHtml(selected.value || selected.qrData || '')}</textarea>
       </div>
     `;
-  } else if (selected.type === 'cctag') {
-    const options = Array.from({ length: CCTAG_MAX_ID - CCTAG_MIN_ID + 1 }, (_, index) => {
+  } else if (selected?.type === 'cctag' || isCCTagAddMode) {
+    const options = selected ? Array.from({ length: CCTAG_MAX_ID - CCTAG_MIN_ID + 1 }, (_, index) => {
       const id = CCTAG_MIN_ID + index;
       return `<option value="${id}" ${normalizeCCTagId(selected.markerId) === id ? 'selected' : ''}>${formatCCTagId(id)}</option>`;
-    }).join('');
+    }).join('') : '';
 
     html += `
-      <div class="prop-group">
+      <div class="prop-group ${isCCTagAddMode ? 'hidden' : ''}">
         <div class="prop-label">Marker ID</div>
         <select id="mobile-prop-cctag-marker" class="prop-input">
           ${options}
         </select>
       </div>
+      <div class="prop-group border-t border-gray-200 pt-4">
+        <div class="flex items-center justify-between mb-1">
+          <div class="prop-label mb-0">Markers</div>
+          <span id="mobile-cctag-selected-count" class="text-xs text-gray-500">1 selected</span>
+        </div>
+        <div id="mobile-cctag-marker-grid" class="grid grid-cols-8 gap-1"></div>
+      </div>
+      <div class="flex gap-2">
+        <button id="mobile-cctag-select-all" type="button" class="flex-1 py-1.5 text-xs border border-gray-200 rounded">All</button>
+        <button id="mobile-cctag-clear-selection" type="button" class="flex-1 py-1.5 text-xs border border-gray-200 rounded">Clear</button>
+      </div>
+      <div class="grid grid-cols-3 gap-2">
+        <div>
+          <label class="prop-label">Spacing</label>
+          <select id="mobile-cctag-layout" class="prop-input">
+            <option value="even">Even</option>
+            <option value="random">Random</option>
+          </select>
+        </div>
+        <div>
+          <label class="prop-label">Format</label>
+          <select id="mobile-cctag-orientation" class="prop-input">
+            <option value="landscape">Landscape</option>
+            <option value="portrait">Portrait</option>
+          </select>
+        </div>
+        <div>
+          <label class="prop-label">Size px</label>
+          <input type="number" id="mobile-cctag-size" class="prop-input text-center" min="${CCTAG_MIN_SIZE}" max="${CCTAG_MAX_BUILDER_SIZE}" value="48">
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-2">
+        <div>
+          <label class="prop-label">ID Gap</label>
+          <input type="number" id="mobile-cctag-id-gap" class="prop-input text-center" min="0" max="96" value="4">
+        </div>
+        <div>
+          <label class="prop-label">Min Gap</label>
+          <input type="number" id="mobile-cctag-min-gap" class="prop-input text-center" min="0" max="96" value="3">
+        </div>
+        <div>
+          <label class="prop-label">Max Gap</label>
+          <input type="number" id="mobile-cctag-max-gap" class="prop-input text-center" min="0" max="512" value="512">
+        </div>
+      </div>
+      <label class="flex items-center gap-2 text-sm">
+        <input type="checkbox" id="mobile-cctag-add-id" checked>
+        Add #ID
+      </label>
+      <button id="mobile-cctag-add-marker" class="w-full py-2 bg-gray-900 text-white rounded disabled:opacity-40">
+        Add selected
+      </button>
     `;
-  } else if (selected.type === 'shape') {
+  } else if (selected?.type === 'shape') {
     const shapeType = selected.shapeType || 'rectangle';
     let fillValue = selected.fill || 'black';
     const strokeValue = selected.stroke || 'black';
@@ -6524,7 +7231,7 @@ function populateMobileProps() {
       </div>
       ` : ''}
     `;
-  } else if (selected.type === 'image') {
+  } else if (selected?.type === 'image') {
     const scaleW = selected.naturalWidth ? (selected.width / selected.naturalWidth) * 100 : 100;
     const scaleH = selected.naturalHeight ? (selected.height / selected.naturalHeight) * 100 : 100;
     const currentScale = Math.round(Math.max(scaleW, scaleH));
@@ -6560,7 +7267,8 @@ function populateMobileProps() {
   }
 
   // Position/Size/Rotation section (collapsible, at bottom)
-  html += `
+  if (selected) {
+    html += `
     <div class="border-t border-gray-200 pt-4 mt-4">
       <div class="prop-label text-gray-400 mb-3">Position & Size</div>
       <div class="prop-group">
@@ -6598,12 +7306,16 @@ function populateMobileProps() {
       </div>
     </div>
   `;
+  }
 
   html += '</div>';
   content.innerHTML = html;
+  populateCCTagGrid($('#mobile-cctag-marker-grid'));
+  updateCCTagBuilderSelectionUI();
 
   // Wire up event handlers
   wireUpMobilePropHandlers(selected);
+  wireUpMobileCCTagBuilderHandlers();
 }
 
 /**
@@ -6613,20 +7325,26 @@ function wireUpMobilePropHandlers(element) {
   // Full update - saves history and syncs desktop panel (use for discrete changes)
   const updateProp = (prop, value) => {
     saveHistory();
-    if (element.type === 'cctag' && (prop === 'width' || prop === 'height')) {
+    const target = state.elements.find(el => el.id === element.id) || element;
+    if (target.type === 'text' && prop === 'fontSize') {
+      value = validateFontSize(value);
+    }
+    if (target.type === 'cctag' && (prop === 'width' || prop === 'height')) {
       const size = normalizeCCTagSize(value);
-      element.width = size;
-      element.height = size;
+      target.width = size;
+      target.height = size;
       const widthInput = $('#mobile-prop-width');
       const heightInput = $('#mobile-prop-height');
       if (widthInput) widthInput.value = String(Math.round(size));
       if (heightInput) heightInput.value = String(Math.round(size));
-    } else if (element.type === 'cctag' && prop === 'markerId') {
-      element.markerId = normalizeCCTagId(value);
+    } else if (target.type === 'cctag' && prop === 'markerId') {
+      modifyElement(target.id, { markerId: normalizeCCTagId(value) });
+      target.markerId = normalizeCCTagId(value);
     } else {
-      element[prop] = value;
+      target[prop] = value;
     }
-    state.renderer.clearCache(element.id);
+    rememberTextDefaultsFromElement(target, { [prop]: target[prop] });
+    state.renderer.clearCache(target.id);
     autoCloneIfEnabled();
     render();
     updatePropertiesPanel();
@@ -6634,8 +7352,9 @@ function wireUpMobilePropHandlers(element) {
 
   // Live update - no history save, no panel sync (use for continuous input like typing)
   const updatePropLive = (prop, value) => {
-    element[prop] = value;
-    state.renderer.clearCache(element.id);
+    const target = state.elements.find(el => el.id === element.id) || element;
+    target[prop] = value;
+    state.renderer.clearCache(target.id);
     autoCloneIfEnabled();
     render();
   };
@@ -6886,6 +7605,27 @@ function wireUpMobilePropHandlers(element) {
     contrastInput.addEventListener('change', saveOnBlur('contrast'));
   }
   $('#mobile-prop-dither')?.addEventListener('change', (e) => updateProp('dither', e.target.value));
+}
+
+function wireUpMobileCCTagBuilderHandlers() {
+  $('#mobile-cctag-add-marker')?.addEventListener('click', () => {
+    addCCTagStrip({
+      markerIds: getCCTagBuilderSelection(),
+      addIdText: $('#mobile-cctag-add-id')?.checked ?? true,
+      layout: $('#mobile-cctag-layout')?.value ?? 'even',
+      orientation: $('#mobile-cctag-orientation')?.value ?? 'landscape',
+      size: $('#mobile-cctag-size')?.value,
+      idGap: $('#mobile-cctag-id-gap')?.value,
+      minGap: $('#mobile-cctag-min-gap')?.value,
+      maxGap: $('#mobile-cctag-max-gap')?.value,
+    });
+  });
+  $('#mobile-cctag-select-all')?.addEventListener('click', () => {
+    setCCTagBuilderSelection(Array.from({ length: CCTAG_MAX_ID - CCTAG_MIN_ID + 1 }, (_, index) => CCTAG_MIN_ID + index));
+  });
+  $('#mobile-cctag-clear-selection')?.addEventListener('click', () => {
+    setCCTagBuilderSelection([]);
+  });
 }
 
 /**
@@ -7245,6 +7985,8 @@ function init() {
     setStatus: setStatus,
   });
 
+  loadTextDefaults();
+
   // Initialize local fonts (show button or auto-load if previously enabled)
   initLocalFonts();
 
@@ -7575,21 +8317,48 @@ function init() {
   $('#add-qr').addEventListener('click', addQRElement);
   $('#add-cctag-btn')?.addEventListener('click', (e) => {
     e.stopPropagation();
-    $('#shape-dropdown')?.classList.add('hidden');
-    $('#cctag-dropdown')?.classList.toggle('hidden');
+    showCCTagPropertiesMode();
   });
   $('#cctag-add-marker')?.addEventListener('click', () => {
-    addCCTagElement({
-      markerId: $('#cctag-marker')?.value ?? 0,
+    addCCTagStrip({
+      markerIds: getCCTagBuilderSelection(),
       addIdText: $('#cctag-add-id')?.checked ?? true,
+      layout: $('#cctag-layout')?.value ?? 'even',
+      orientation: $('#cctag-orientation')?.value ?? 'landscape',
+      size: $('#cctag-size')?.value,
+      idGap: $('#cctag-id-gap')?.value,
+      minGap: $('#cctag-min-gap')?.value,
+      maxGap: $('#cctag-max-gap')?.value,
     });
-    $('#cctag-dropdown')?.classList.add('hidden');
+  });
+  $('#cctag-select-all')?.addEventListener('click', () => {
+    setCCTagBuilderSelection(Array.from({ length: CCTAG_MAX_ID - CCTAG_MIN_ID + 1 }, (_, index) => CCTAG_MIN_ID + index));
+  });
+  $('#cctag-clear-selection')?.addEventListener('click', () => {
+    setCCTagBuilderSelection([]);
+  });
+  $('#cctag-strip-apply')?.addEventListener('click', () => {
+    reflowSelectedCCTagBlocks({
+      layout: $('#cctag-strip-layout')?.value ?? 'even',
+      size: $('#cctag-strip-size')?.value,
+      idGap: $('#cctag-strip-id-gap')?.value,
+      minGap: $('#cctag-strip-min-gap')?.value,
+      maxGap: $('#cctag-strip-max-gap')?.value,
+    });
+  });
+  $('#prop-cctag-id-text')?.addEventListener('input', (e) => {
+    modifySelectedCCTagIdText({ text: e.target.value });
+  });
+  $('#prop-cctag-id-font-family')?.addEventListener('change', (e) => {
+    modifySelectedCCTagIdText({ fontFamily: e.target.value });
+  });
+  $('#prop-cctag-id-font-size')?.addEventListener('input', (e) => {
+    modifySelectedCCTagIdText({ fontSize: validateFontSize(e.target.value) });
   });
 
   // Shape dropdown toggle
   $('#add-shape-btn').addEventListener('click', (e) => {
     e.stopPropagation();
-    $('#cctag-dropdown')?.classList.add('hidden');
     $('#shape-dropdown').classList.toggle('hidden');
   });
 
@@ -7604,9 +8373,6 @@ function init() {
 
   // Close shape dropdown when clicking outside
   document.addEventListener('click', (e) => {
-    if (!e.target.closest('#add-cctag-btn') && !e.target.closest('#cctag-dropdown')) {
-      $('#cctag-dropdown')?.classList.add('hidden');
-    }
     if (!e.target.closest('#add-shape-btn') && !e.target.closest('#shape-dropdown')) {
       $('#shape-dropdown').classList.add('hidden');
     }
@@ -7614,26 +8380,11 @@ function init() {
 
   // Element actions
   $('#duplicate-btn').addEventListener('click', () => {
-    const selected = getSelected();
-    if (selected) {
-      saveHistory();
-      state.elements = duplicateElement(state.elements, selected.id);
-      autoCloneIfEnabled();
-      selectElement(state.elements[state.elements.length - 1].id);
-      setStatus('Element duplicated');
-    }
+    duplicateSelectedElements();
   });
 
   $('#delete-btn').addEventListener('click', () => {
-    const selected = getSelected();
-    if (selected) {
-      saveHistory();
-      state.renderer.clearCache(selected.id);
-      state.elements = deleteElement(state.elements, selected.id);
-      autoCloneIfEnabled();
-      deselect();
-      setStatus('Element deleted');
-    }
+    deleteSelectedElements();
   });
 
   // Undo/Redo buttons
@@ -7764,14 +8515,26 @@ function init() {
     propsBackdrop.addEventListener('click', closePropsPanel);
   }
 
-  // Properties panel - common position/dimension inputs (only works for single selection)
+  // Properties panel - common position/dimension inputs
+  const commonPropertiesContext = createBindingContext(state, getSelected, modifyElement);
+  commonPropertiesContext.getSelectedId = () => {
+    const marker = getSelectedCCTagBlockMarker();
+    return marker?.id || state.selectedIds[0] || null;
+  };
+  commonPropertiesContext.modifyElement = (id, changes) => {
+    const target = state.elements.find(el => el.id === id);
+    if (target?.type === 'cctag' && target.cctagBlockId && Object.keys(changes).length === 1 && 'rotation' in changes) {
+      if (rotateCCTagBlockTo(target, changes.rotation)) return;
+    }
+    modifyElement(id, changes);
+  };
   bindPositionInputs({
     x: '#prop-x',
     y: '#prop-y',
     width: '#prop-width',
     height: '#prop-height',
     rotation: '#prop-rotation',
-  }, createBindingContext(state, getSelected, modifyElement), {
+  }, commonPropertiesContext, {
     minWidth: ELEMENT.MIN_WIDTH,
     minHeight: ELEMENT.MIN_HEIGHT,
   });
@@ -8136,10 +8899,7 @@ function init() {
   });
 
   $('#prop-cctag-marker')?.addEventListener('change', (e) => {
-    const id = state.selectedIds[0];
-    if (id) {
-      modifyElement(id, { markerId: normalizeCCTagId(e.target.value) });
-    }
+    updateSelectedCCTagMarkerId(e.target.value);
   });
 
 
