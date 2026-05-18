@@ -3,6 +3,11 @@
  * Handles creation, manipulation, and hit testing of label elements
  */
 
+import {
+  CCTAG_MIN_SIZE,
+  normalizeCCTagId,
+} from './cctag.js?v=1';
+
 /**
  * Generate unique ID
  */
@@ -95,6 +100,29 @@ export function createQRElement(data = 'https://example.com', options = {}) {
     rotation: options.rotation ?? 0,
     // QR-specific
     qrData: data,
+  };
+}
+
+/**
+ * Create a CCTag marker element
+ */
+export function createCCTagElement(markerId = 0, options = {}) {
+  const parsedSize = Number.parseFloat(options.size ?? options.width ?? options.height);
+  const size = Math.max(
+    CCTAG_MIN_SIZE,
+    Math.round(Number.isFinite(parsedSize) ? parsedSize : 100)
+  );
+
+  return {
+    id: generateId(),
+    type: 'cctag',
+    zone: options.zone ?? 0,
+    x: options.x ?? 50,
+    y: options.y ?? 50,
+    width: size,
+    height: size,
+    rotation: options.rotation ?? 0,
+    markerId: normalizeCCTagId(markerId),
   };
 }
 
@@ -296,6 +324,7 @@ export const MIN_SIZES = {
   barcode: { width: 80, height: 40 },
   qr: { width: 50, height: 50 },
   shape: { width: 10, height: 10 },
+  cctag: { width: CCTAG_MIN_SIZE, height: CCTAG_MIN_SIZE },
 };
 
 /**
@@ -303,6 +332,15 @@ export const MIN_SIZES = {
  */
 export function constrainSize(element) {
   const min = MIN_SIZES[element.type] || { width: 20, height: 20 };
+  if (element.type === 'cctag') {
+    const size = Math.max(element.width, element.height, min.width, min.height);
+    return {
+      ...element,
+      width: size,
+      height: size,
+    };
+  }
+
   return {
     ...element,
     width: Math.max(element.width, min.width),

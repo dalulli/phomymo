@@ -4,6 +4,7 @@
  */
 
 import { drawHandles, drawGroupHandles } from './handles.js?v=5';
+import { getCCTagRadii } from './cctag.js?v=1';
 import { logError, ErrorLevel } from './utils/errors.js';
 
 // Pixels per mm (203 DPI ≈ 8 px/mm)
@@ -187,6 +188,7 @@ export class CanvasRenderer {
       rotation: e.rotation, type: e.type, text: e.text,
       imageData: e.imageData?.substring(0, 50), // Just enough to detect changes
       barcodeData: e.barcodeData, qrData: e.qrData,
+      markerId: e.markerId,
       brightness: e.brightness, contrast: e.contrast, dither: e.dither,
     }))) + `_${ditherMode}_${this.labelWidth}_${this.labelHeight}`;
 
@@ -882,6 +884,9 @@ export class CanvasRenderer {
       case 'qr':
         this.renderQRElement(element, width, height);
         break;
+      case 'cctag':
+        this.renderCCTagElement(element, width, height);
+        break;
       case 'shape':
         this.renderShapeElement(element, width, height);
         break;
@@ -1334,6 +1339,33 @@ export class CanvasRenderer {
       this.ctx.strokeStyle = '#ccc';
       this.ctx.strokeRect(-size / 2, -size / 2, size, size);
     }
+  }
+
+  /**
+   * Render CCTag marker element (centered at origin)
+   */
+  renderCCTagElement(element, width, height) {
+    const radii = getCCTagRadii(element.markerId);
+    if (!radii) return;
+
+    const size = Math.min(width, height);
+    const outerRadius = size / 2;
+
+    this.ctx.save();
+    this.ctx.beginPath();
+    this.ctx.arc(0, 0, outerRadius, 0, Math.PI * 2);
+    this.ctx.fillStyle = 'black';
+    this.ctx.fill();
+
+    let fillColor = 'white';
+    for (const radiusPercent of radii) {
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, outerRadius * (radiusPercent / 100), 0, Math.PI * 2);
+      this.ctx.fillStyle = fillColor;
+      this.ctx.fill();
+      fillColor = fillColor === 'white' ? 'black' : 'white';
+    }
+    this.ctx.restore();
   }
 
   /**
