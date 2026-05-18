@@ -1,10 +1,10 @@
 /**
  * Phomymo Label Designer Application
  * Multi-element label editor with drag, resize, and rotate
- * v116
+ * v117
  */
 
-import { CanvasRenderer } from './canvas.js?v=114';
+import { CanvasRenderer } from './canvas.js?v=115';
 import { BLETransport } from './ble.js?v=103';
 import { USBTransport } from './usb.js?v=101';
 import { print, printDensityTest, isDSeriesPrinter, isP12Printer, isA30Printer, isTapePrinter, isPM241Printer, isTSPLPrinter, isRotatedPrinter, getPrinterWidthBytes, getPrinterDpi, getPrinterAlignment, getPrinterDescription, isDeviceRecognized, getMatchedPattern, loadPrinterDefinitions, getAllPrinterDefinitions, getPrinterDefinition, getCustomPrinterDefinitions, saveCustomPrinterDefinition, deleteCustomPrinterDefinition, isBuiltinPrinter, resetBuiltinPrinter, getAvailableProtocols, getAvailableLabelPresets, getDetectedDefinition } from './printer.js?v=128';
@@ -13,6 +13,7 @@ import {
   createImageElement,
   createBarcodeElement,
   createQRElement,
+  createCCTagElement,
   createShapeElement,
   updateElement,
   deleteElement,
@@ -36,7 +37,15 @@ import {
   collapseToSingleZone,
   hasElementsInHigherZones,
   removeElementsInHigherZones,
-} from './elements.js?v=100';
+} from './elements.js?v=101';
+import {
+  CCTAG_MAX_ID,
+  CCTAG_MIN_ID,
+  CCTAG_MIN_SIZE,
+  formatCCTagId,
+  loadCCTagRadii,
+  normalizeCCTagId,
+} from './cctag.js?v=1';
 import {
   HandleType,
   getHandleAtPoint,
@@ -384,12 +393,78 @@ async function initLocalFonts() {
  * @returns {string} Dither mode ('auto', 'none', 'threshold', 'floyd-steinberg', 'atkinson', 'ordered')
  */
 function getDitherMode(elements) {
+  if (elements.some(el => el.type === 'cctag')) {
+    return 'threshold';
+  }
+
   for (const el of elements) {
     if (el.type === 'image' && el.dither) {
       return el.dither;
     }
   }
   return 'auto';
+}
+
+function populateCCTagSelect(select) {
+  if (!select || select.options.length) return;
+
+  for (let id = CCTAG_MIN_ID; id <= CCTAG_MAX_ID; id++) {
+    const option = document.createElement('option');
+    option.value = String(id);
+    option.textContent = formatCCTagId(id);
+    select.appendChild(option);
+  }
+}
+
+function initCCTagData() {
+  $('#add-cctag-btn')?.setAttribute('disabled', 'true');
+  $('#mobile-add-cctag')?.setAttribute('disabled', 'true');
+
+  loadCCTagRadii()
+    .then(() => {
+      populateCCTagSelect($('#cctag-marker'));
+      populateCCTagSelect($('#prop-cctag-marker'));
+      populateCCTagSelect($('#mobile-cctag-marker'));
+      $('#add-cctag-btn')?.removeAttribute('disabled');
+      $('#mobile-add-cctag')?.removeAttribute('disabled');
+      render();
+      updatePropertiesPanel();
+    })
+    .catch((error) => {
+      logError(error, 'loadCCTagRadii');
+      setStatus('CCTag data failed to load');
+    });
+}
+
+function getDefaultCCTagSize() {
+  const dims = state.renderer.getSingleLabelDimensions();
+  const size = Math.floor(Math.min(dims.width, dims.height));
+  return Math.max(CCTAG_MIN_SIZE, size);
+}
+
+function normalizeCCTagSize(value) {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return getDefaultCCTagSize();
+  return Math.max(CCTAG_MIN_SIZE, Math.round(parsed));
+}
+
+function normalizeCCTagGeometry(element, changes = {}) {
+  if (element.type !== 'cctag') return changes;
+
+  const normalized = { ...changes };
+
+  if ('markerId' in normalized) {
+    normalized.markerId = normalizeCCTagId(normalized.markerId);
+  }
+
+  if ('width' in normalized || 'height' in normalized) {
+    const editedSize = 'width' in normalized ? normalized.width : normalized.height;
+    const size = normalizeCCTagSize(editedSize);
+    normalized.width = size;
+    normalized.height = size;
+  }
+
+  return normalized;
 }
 
 /**
@@ -2152,10 +2227,15 @@ function deselect() {
  * Update element and re-render
  */
 function modifyElement(id, changes) {
+  const current = state.elements.find(el => el.id === id);
+  if (current?.type === 'cctag') {
+    changes = normalizeCCTagGeometry(current, changes);
+  }
+
   state.elements = updateElement(state.elements, id, changes);
 
   // Only clear cache if content or size changed (not just position/rotation)
-  const contentKeys = ['width', 'height', 'text', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textDecoration', 'background', 'noWrap', 'clipOverflow', 'autoScale', 'verticalAlign', 'imageData', 'barcodeData', 'barcodeFormat', 'qrData', 'brightness', 'contrast', 'dither', 'showText', 'textFontSize', 'textBold'];
+  const contentKeys = ['width', 'height', 'text', 'fontSize', 'fontFamily', 'fontWeight', 'fontStyle', 'textDecoration', 'background', 'noWrap', 'clipOverflow', 'autoScale', 'verticalAlign', 'imageData', 'barcodeData', 'barcodeFormat', 'qrData', 'brightness', 'contrast', 'dither', 'showText', 'textFontSize', 'textBold', 'markerId'];
   const needsCacheClear = Object.keys(changes).some(key => contentKeys.includes(key));
   if (needsCacheClear) {
     state.renderer.clearCache(id);
@@ -2320,6 +2400,7 @@ function updatePropertiesPanel() {
   $('#props-image').classList.add('hidden');
   $('#props-barcode').classList.add('hidden');
   $('#props-qr').classList.add('hidden');
+  $('#props-cctag')?.classList.add('hidden');
   $('#props-shape').classList.add('hidden');
 
   // Show and populate type-specific panel
@@ -2390,6 +2471,12 @@ function updatePropertiesPanel() {
     case 'qr':
       $('#props-qr').classList.remove('hidden');
       $('#prop-qr-data').value = element.qrData || '';
+      break;
+
+    case 'cctag':
+      $('#props-cctag')?.classList.remove('hidden');
+      populateCCTagSelect($('#prop-cctag-marker'));
+      $('#prop-cctag-marker').value = String(normalizeCCTagId(element.markerId));
       break;
 
     case 'shape':
@@ -3180,8 +3267,9 @@ function handleCanvasMouseMove(e) {
         const resizeEl = state.dragStartElements[0];
         // For images with lockAspectRatio, preserve aspect by default (Shift to unlock)
         // For other elements, Shift preserves aspect
+        const isCCTag = resizeEl.type === 'cctag';
         const isLockedImage = resizeEl.type === 'image' && resizeEl.lockAspectRatio !== false;
-        const preserveAspect = isLockedImage ? !e.shiftKey : e.shiftKey;
+        const preserveAspect = isCCTag ? true : (isLockedImage ? !e.shiftKey : e.shiftKey);
         const newBounds = calculateResize(resizeEl, state.dragHandle, dx, dy, preserveAspect);
         modifyElement(resizeEl.id, constrainSize({ ...resizeEl, ...newBounds }));
         break;
@@ -3793,8 +3881,9 @@ function handleCanvasPointerMove(e) {
 
       case 'resize': {
         const resizeEl = state.dragStartElements[0];
+        const isCCTag = resizeEl.type === 'cctag';
         const isLockedImage = resizeEl.type === 'image' && resizeEl.lockAspectRatio !== false;
-        const preserveAspect = isLockedImage ? !e.shiftKey : e.shiftKey;
+        const preserveAspect = isCCTag ? true : (isLockedImage ? !e.shiftKey : e.shiftKey);
         const newBounds = calculateResize(resizeEl, state.dragHandle, dx, dy, preserveAspect);
         modifyElement(resizeEl.id, constrainSize({ ...resizeEl, ...newBounds }));
         break;
@@ -4239,8 +4328,10 @@ function handleCanvasTouchMove(e) {
 
     case 'resize': {
       const resizeEl = state.dragStartElements[0];
-      const isLockedImage = resizeEl.type === 'image' && resizeEl.lockAspectRatio !== false;
-      const newBounds = calculateResize(resizeEl, state.dragHandle, dx, dy, isLockedImage);
+      const isLockedAspectElement =
+        resizeEl.type === 'cctag' ||
+        (resizeEl.type === 'image' && resizeEl.lockAspectRatio !== false);
+      const newBounds = calculateResize(resizeEl, state.dragHandle, dx, dy, isLockedAspectElement);
       modifyElement(resizeEl.id, constrainSize({ ...resizeEl, ...newBounds }));
       break;
     }
@@ -4525,6 +4616,51 @@ function addQRElement() {
   autoCloneIfEnabled();
   selectElement(element.id);
   setStatus('QR code added');
+}
+
+/**
+ * Add a new CCTag marker element, optionally with a normal text ID label
+ */
+function addCCTagElement(options = {}) {
+  saveHistory();
+
+  const markerId = normalizeCCTagId(options.markerId ?? 0);
+  const addIdText = options.addIdText ?? true;
+  const size = normalizeCCTagSize(options.size ?? getDefaultCCTagSize());
+  const dims = state.renderer.getSingleLabelDimensions();
+  const gap = 4;
+  const textWidth = addIdText ? Math.max(36, Math.round(size * 0.7)) : 0;
+  const totalWidth = textWidth + (addIdText ? gap : 0) + size;
+  const startX = Math.max(0, (dims.width - totalWidth) / 2);
+  const y = Math.max(0, (dims.height - size) / 2);
+
+  let cctagX = startX;
+  if (addIdText) {
+    const idText = createTextElement(`(${formatCCTagId(markerId)})`, {
+      x: startX,
+      y,
+      width: textWidth,
+      height: size,
+      fontSize: Math.max(10, Math.round(size * 0.22)),
+      align: 'right',
+      verticalAlign: 'middle',
+      zone: state.activeZone,
+    });
+    state.elements.push(idText);
+    cctagX = startX + textWidth + gap;
+  }
+
+  const element = createCCTagElement(markerId, {
+    x: cctagX,
+    y,
+    width: size,
+    height: size,
+    zone: state.activeZone,
+  });
+  state.elements.push(element);
+  autoCloneIfEnabled();
+  selectElement(element.id);
+  setStatus(`CCTag ${formatCCTagId(markerId)} added`);
 }
 
 /**
@@ -5234,6 +5370,7 @@ function getElementIcon(type) {
     image: '<svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>',
     barcode: '<svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h2M4 12h2m10 0h2"/></svg>',
     qr: '<svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h2M4 12h2m10 0h2"/></svg>',
+    cctag: '<svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" stroke-width="2"/><circle cx="12" cy="12" r="5" stroke-width="2"/><circle cx="12" cy="12" r="2" stroke-width="2"/></svg>',
     shape: '<svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 5a1 1 0 011-1h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5z"/></svg>',
   };
   return icons[type] || icons.shape;
@@ -5252,6 +5389,8 @@ function getElementLabel(el) {
       return el.barcodeData ? `Barcode: ${el.barcodeData.substring(0, 10)}` : 'Barcode';
     case 'qr':
       return el.qrData ? `QR: ${el.qrData.substring(0, 15)}` : 'QR Code';
+    case 'cctag':
+      return `CCTag ${formatCCTagId(el.markerId)}`;
     case 'shape':
       const shapeNames = { rectangle: 'Rectangle', ellipse: 'Ellipse', triangle: 'Triangle', line: 'Line' };
       return shapeNames[el.shapeType] || 'Shape';
@@ -5974,6 +6113,20 @@ function initMobileUI() {
   $('#mobile-add-line')?.addEventListener('click', () => addShapeElement('line'));
   $('#mobile-add-barcode')?.addEventListener('click', () => addBarcodeElement());
   $('#mobile-add-qr')?.addEventListener('click', () => addQRElement());
+  $('#mobile-add-cctag')?.addEventListener('click', () => {
+    closeMobileMenu();
+    $('#mobile-cctag-menu')?.classList.toggle('hidden');
+  });
+  $('#mobile-cctag-add-marker')?.addEventListener('click', () => {
+    addCCTagElement({
+      markerId: $('#mobile-cctag-marker')?.value ?? 0,
+      addIdText: $('#mobile-cctag-add-id')?.checked ?? true,
+    });
+    $('#mobile-cctag-menu')?.classList.add('hidden');
+  });
+  $('#mobile-cctag-close')?.addEventListener('click', () => {
+    $('#mobile-cctag-menu')?.classList.add('hidden');
+  });
 
   // Edit button - open properties panel
   $('#mobile-edit-btn')?.addEventListener('click', openMobileProps);
@@ -6102,6 +6255,7 @@ function populateMobileProps() {
     shape: selected.shapeType ? selected.shapeType.charAt(0).toUpperCase() + selected.shapeType.slice(1) : 'Shape',
     barcode: 'Barcode',
     qr: 'QR Code',
+    cctag: 'CCTag',
   };
   title.textContent = typeNames[selected.type] || 'Properties';
 
@@ -6308,6 +6462,20 @@ function populateMobileProps() {
         <textarea id="mobile-prop-value" class="prop-input" rows="3">${escapeHtml(selected.value || selected.qrData || '')}</textarea>
       </div>
     `;
+  } else if (selected.type === 'cctag') {
+    const options = Array.from({ length: CCTAG_MAX_ID - CCTAG_MIN_ID + 1 }, (_, index) => {
+      const id = CCTAG_MIN_ID + index;
+      return `<option value="${id}" ${normalizeCCTagId(selected.markerId) === id ? 'selected' : ''}>${formatCCTagId(id)}</option>`;
+    }).join('');
+
+    html += `
+      <div class="prop-group">
+        <div class="prop-label">Marker ID</div>
+        <select id="mobile-prop-cctag-marker" class="prop-input">
+          ${options}
+        </select>
+      </div>
+    `;
   } else if (selected.type === 'shape') {
     const shapeType = selected.shapeType || 'rectangle';
     let fillValue = selected.fill || 'black';
@@ -6445,7 +6613,19 @@ function wireUpMobilePropHandlers(element) {
   // Full update - saves history and syncs desktop panel (use for discrete changes)
   const updateProp = (prop, value) => {
     saveHistory();
-    element[prop] = value;
+    if (element.type === 'cctag' && (prop === 'width' || prop === 'height')) {
+      const size = normalizeCCTagSize(value);
+      element.width = size;
+      element.height = size;
+      const widthInput = $('#mobile-prop-width');
+      const heightInput = $('#mobile-prop-height');
+      if (widthInput) widthInput.value = String(Math.round(size));
+      if (heightInput) heightInput.value = String(Math.round(size));
+    } else if (element.type === 'cctag' && prop === 'markerId') {
+      element.markerId = normalizeCCTagId(value);
+    } else {
+      element[prop] = value;
+    }
     state.renderer.clearCache(element.id);
     autoCloneIfEnabled();
     render();
@@ -6568,6 +6748,9 @@ function wireUpMobilePropHandlers(element) {
   });
   $('#mobile-prop-textFontSize')?.addEventListener('change', (e) => updateProp('textFontSize', parseInt(e.target.value) || 12));
   $('#mobile-prop-textBold')?.addEventListener('change', (e) => updateProp('textBold', e.target.checked));
+  $('#mobile-prop-cctag-marker')?.addEventListener('change', (e) => {
+    updateProp('markerId', e.target.value);
+  });
 
   // Mobile field insertion buttons
   $$('.mobile-field-btn').forEach(btn => {
@@ -7096,6 +7279,7 @@ function init() {
     }
   };
   updatePrintSize();
+  initCCTagData();
 
   // Label size
   $('#label-size').addEventListener('change', handleLabelSizeChange);
@@ -7389,10 +7573,23 @@ function init() {
   });
   $('#add-barcode').addEventListener('click', addBarcodeElement);
   $('#add-qr').addEventListener('click', addQRElement);
+  $('#add-cctag-btn')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    $('#shape-dropdown')?.classList.add('hidden');
+    $('#cctag-dropdown')?.classList.toggle('hidden');
+  });
+  $('#cctag-add-marker')?.addEventListener('click', () => {
+    addCCTagElement({
+      markerId: $('#cctag-marker')?.value ?? 0,
+      addIdText: $('#cctag-add-id')?.checked ?? true,
+    });
+    $('#cctag-dropdown')?.classList.add('hidden');
+  });
 
   // Shape dropdown toggle
   $('#add-shape-btn').addEventListener('click', (e) => {
     e.stopPropagation();
+    $('#cctag-dropdown')?.classList.add('hidden');
     $('#shape-dropdown').classList.toggle('hidden');
   });
 
@@ -7407,6 +7604,9 @@ function init() {
 
   // Close shape dropdown when clicking outside
   document.addEventListener('click', (e) => {
+    if (!e.target.closest('#add-cctag-btn') && !e.target.closest('#cctag-dropdown')) {
+      $('#cctag-dropdown')?.classList.add('hidden');
+    }
     if (!e.target.closest('#add-shape-btn') && !e.target.closest('#shape-dropdown')) {
       $('#shape-dropdown').classList.add('hidden');
     }
@@ -7933,6 +8133,13 @@ function init() {
       e.target.classList.remove('border-red-300');
     }
     modifyElement(id, { qrData: e.target.value });
+  });
+
+  $('#prop-cctag-marker')?.addEventListener('change', (e) => {
+    const id = state.selectedIds[0];
+    if (id) {
+      modifyElement(id, { markerId: normalizeCCTagId(e.target.value) });
+    }
   });
 
 
